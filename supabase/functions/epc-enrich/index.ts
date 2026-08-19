@@ -22,7 +22,7 @@ function clamp(value: number, min = 0, max = 100) {
 }
 
 function cleanPostcode(value: unknown) {
-  const raw = String(value ?? "").toUpperCase().replace(/\s+/g, "").trim();
+  const raw = String(value ?? "").toUpperCase().replace(/[\s+]+/g, "").trim();
   if (!raw) return "";
   return raw.length > 3 ? `${raw.slice(0, -3)} ${raw.slice(-3)}` : raw;
 }
