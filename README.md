@@ -2,25 +2,46 @@
 
 A transparent house-shortlisting tool that ranks properties out of 100 using both an objective **House Score** and a configurable **Your Score**.
 
-## Milestone 1 — working static prototype
+## Current status
 
-The first version is intentionally frontend-only so the ranking experience can be tested before external data sources are added.
-
-### Included now
+### Phase 1 — GitHub Pages + Supabase foundation
 
 - Ranked property shortlist
-- House Score /100 using fixed V1 baseline weights
+- House Score /100 using fixed baseline weights
 - Your Score /100 using configurable weights
-- Weight editor that must total 100%
-- Deal-breaker warnings for budget, bedrooms, commute, flood risk and parking
-- Manual Add House form with listing URL
-- Per-category score breakdown
-- Sort by Your Score, House Score or price
-- Local browser persistence via `localStorage`
-- Responsive desktop/mobile layout
-- Clearly labelled demo properties
+- Deal-breaker warnings
+- Manual Add House flow
+- Responsive GitHub Pages frontend
+- Supabase Auth and private per-user shortlist/settings sync
+- Row Level Security on user-owned data
 
-## V1 scoring baseline
+### Phase 2 — automatic EPC enrichment
+
+When a signed-in user saves a property, House Ranker now:
+
+1. Captures/normalises the postcode from the Add House flow.
+2. Calls the authenticated Supabase Edge Function `epc-enrich`.
+3. Searches the official MHCLG Energy Performance of Buildings developer API by postcode/address.
+4. Scores candidate addresses and only auto-applies a match at 75% confidence or above.
+5. Fetches the matched certificate and saves useful EPC fields to Supabase.
+6. Saves total floor area to `properties.floor_area_m2`.
+7. Saves a compact EPC provenance record plus `energy_score` to `area_metrics`.
+8. Replaces the manual Energy metric with the current EPC numerical energy-efficiency rating, clamped to 0–100.
+9. Shows EPC band/rating, floor area, match status and a retry action in the UI.
+
+If the certificate lacks a usable numerical current rating, the fallback Energy scores are A=95, B=85, C=72, D=60, E=47, F=32 and G=15. Uncertain matches are marked `needs_review` rather than silently attached to a property.
+
+## EPC API activation
+
+The government API bearer token is intentionally **not** stored in GitHub or browser JavaScript.
+
+Create/sign in to the GOV.UK **Get energy performance of buildings data** service, obtain the developer API bearer token, then add it to the Supabase project as an Edge Function secret named:
+
+`EPC_BEARER_TOKEN`
+
+The deployed function reads it only server-side.
+
+## Scoring baseline
 
 | Category | Weight |
 | --- | ---: |
@@ -37,41 +58,31 @@ The first version is intentionally frontend-only so the ranking experience can b
 
 The fixed weights produce the House Score. The user-adjustable weights produce Your Score.
 
-## Planned architecture
+## Architecture
 
 ### Front end
 
-GitHub Pages will host the static HTML/CSS/JavaScript application.
+GitHub Pages hosts the static HTML/CSS/JavaScript app. `epc.js` progressively enhances the Phase 1 UI and calls the Edge Function only for authenticated users.
 
 ### Backend
 
-Supabase will later store properties, preferences, raw area metrics, price history, viewing notes and enrichment status. External API keys and enrichment logic should live server-side (for example in Supabase Edge Functions), never in the public GitHub Pages JavaScript.
+Supabase stores properties, preferences, enrichment status/provenance, raw area metrics, price history and viewing data. External API credentials remain in Edge Function secrets rather than public GitHub Pages code.
 
-### Planned data flow
+### EPC files
 
-1. Paste a Rightmove/Zoopla/OnTheMarket listing URL.
-2. Confirm address, asking price, bedrooms and property type.
-3. Save the property.
-4. Enrich the address using authorised/public data sources.
-5. Store raw measurements separately from calculated scores.
-6. Recalculate House Score and Your Score.
-7. Rank the shortlist and show deal-breakers.
+- `epc.js` — browser integration, postcode capture, automatic lookup trigger and EPC UI
+- `epc.css` — EPC enrichment UI styles
+- `supabase/functions/epc-enrich/index.ts` — authenticated server-side EPC search/match/fetch/store logic
 
 ## Next milestones
 
-1. Connect Supabase and replace local-only storage.
-2. Add authentication and Row Level Security.
-3. Add EPC enrichment.
-4. Add crime and school enrichment.
-5. Add Land Registry comparable-sales/value analysis.
-6. Add commute, amenities and environmental data.
-7. Add viewing notes/status and price-history tracking.
-8. Add map and richer property comparison views.
+1. Finish live EPC API activation/testing with the government bearer token.
+2. Add crime and school enrichment.
+3. Add Land Registry comparable-sales/value analysis.
+4. Add commute, amenities and environmental data.
+5. Add viewing notes/status and price-history tracking.
+6. Add map and richer property comparison views.
 
 ## Run locally
 
 No build step is required. Open `index.html` in a browser, or serve the directory with any simple static web server.
-
-## GitHub Pages
-
-Once GitHub Pages is enabled for the repository's `main` branch, the site can be served directly from the repository root.
