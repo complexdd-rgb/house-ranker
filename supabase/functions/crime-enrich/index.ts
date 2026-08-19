@@ -5,6 +5,7 @@ const POSTCODE_API = "https://api.postcodes.io/postcodes";
 const SOURCE = "Police.uk street-level crime API";
 const MONTHS = 6;
 const RADIUS_METRES = 1000;
+const REQUEST_SPACING_MS = 450;
 
 const CATEGORY_WEIGHTS: Record<string, number> = {
   "violent-crime": 2.0,
@@ -38,6 +39,10 @@ function json(body: unknown, status = 200) {
 
 function clamp(value: number, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function cleanPostcode(value: unknown) {
@@ -84,10 +89,34 @@ function crimeScore(weightedMonthlyAverage: number) {
   return clamp(Math.round(100 - 5 * Math.sqrt(Math.max(0, weightedMonthlyAverage))), 5, 100);
 }
 
-async function fetchJson(url: string) {
+class RateLimitError extends Error {
+  retryAfter: number;
+  constructor(retryAfter: number) {
+    super(`Police.uk rate limit; retry after ${retryAfter}s`);
+    this.retryAfter = retryAfter;
+  }
+}
+
+async function fetchJson(url: string, { police = false }: { police?: boolean } = {}) {
   const response = await fetch(url, {
-    headers: { "Accept": "application/json", "User-Agent": "House-Ranker/1.0" },
+    headers: { "Accept": "application/json", "User-Agent": "House-Ranker/1.1" },
   });
+
+  if (response.status === 429 && police) {
+    const text = await response.text();
+    let bodyRetry: number | null = null;
+    try {
+      const parsed = JSON.parse(text);
+      const parsedRetry = Number(parsed?.retry_after);
+      if (Number.isFinite(parsedRetry)) bodyRetry = parsedRetry;
+    } catch {}
+    const headerRetry = Number(response.headers.get("retry-after"));
+    const retryAfter = Math.max(5, Math.min(120,
+      Number.isFinite(headerRetry) && headerRetry > 0 ? headerRetry : (bodyRetry ?? 30)
+    ));
+    throw new RateLimitError(retryAfter);
+  }
+
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`${response.status} from ${new URL(url).hostname}: ${body.slice(0, 240)}`);
@@ -99,8 +128,8 @@ async function resolveCoordinates(postcode: string, existingLat: unknown, existi
   const lat = toNumber(existingLat);
   const lng = toNumber(existingLng);
   if (lat !== null && lng !== null) return { lat, lng, method: "listing_coordinates" };
-
   if (!isFullPostcode(postcode)) return null;
+
   const compact = postcode.replace(/\s+/g, "");
   const payload = await fetchJson(`${POSTCODE_API}/${encodeURIComponent(compact)}`);
   const result = payload?.result;
@@ -134,9 +163,7 @@ Deno.serve(async (req: Request) => {
   try {
     const publishableKeys = JSON.parse(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS") ?? "{}");
     publishableKey = publishableKeys.default || legacyAnon;
-  } catch {
-    publishableKey = legacyAnon;
-  }
+  } catch {}
 
   const supabase = createClient(supabaseUrl, publishableKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -158,7 +185,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: property, error: propertyError } = await supabase
     .from("properties")
-    .select("id,address,postcode,latitude,longitude,metrics")
+    .select("id,address,postcode,latitude,longitude,metrics,crime_status,crime_enriched_at")
     .eq("id", propertyId)
     .single();
 
@@ -172,7 +199,7 @@ Deno.serve(async (req: Request) => {
       source: "crime",
       status: "running",
       started_at: startedAt,
-      payload: { postcode: property.postcode || null, radiusMetres: RADIUS_METRES, months: MONTHS },
+      payload: { postcode: property.postcode || null, radiusMetres: RADIUS_METRES, months: MONTHS, requestMode: "serial" },
     })
     .select("id")
     .single();
@@ -200,20 +227,22 @@ Deno.serve(async (req: Request) => {
       return json({ status: "needs_location", property: updated });
     }
 
-    const latest = await fetchJson(`${POLICE_API}/crime-last-updated`);
+    const latest = await fetchJson(`${POLICE_API}/crime-last-updated`, { police: true });
     const latestMonth = String(latest?.date ?? "").slice(0, 7);
     if (!/^\d{4}-\d{2}$/.test(latestMonth)) throw new Error("Police.uk did not return a valid latest crime month");
 
     const months = monthsEndingAt(latestMonth, MONTHS);
     const poly = polygonAround(coordinates.lat, coordinates.lng, RADIUS_METRES);
+    const monthlyResults: Array<{ month: string; total: number; weighted: number; categories: Record<string, number> }> = [];
 
-    const monthlyResults = await Promise.all(months.map(async month => {
+    for (const month of months) {
+      await sleep(REQUEST_SPACING_MS);
       const params = new URLSearchParams({ date: month, poly });
-      const crimes = await fetchJson(`${POLICE_API}/crimes-street/all-crime?${params.toString()}`);
+      const crimes = await fetchJson(`${POLICE_API}/crimes-street/all-crime?${params.toString()}`, { police: true });
       const rows = Array.isArray(crimes) ? crimes : [];
       const summary = summarizeCategories(rows);
-      return { month, total: rows.length, weighted: summary.weighted, categories: summary.counts };
-    }));
+      monthlyResults.push({ month, total: rows.length, weighted: summary.weighted, categories: summary.counts });
+    }
 
     const totalCrimes = monthlyResults.reduce((sum, month) => sum + month.total, 0);
     const weightedTotal = monthlyResults.reduce((sum, month) => sum + month.weighted, 0);
@@ -282,44 +311,42 @@ Deno.serve(async (req: Request) => {
         categoryTotals,
         topCategories,
         monthlyResults,
+        requestMode: "serial_450ms_spacing",
         locationNote: "Police.uk street-level coordinates are anonymised/approximate; this score represents the surrounding neighbourhood, not the exact property.",
       },
     };
 
     const { error: areaError } = await supabase
       .from("area_metrics")
-      .upsert({
-        property_id: propertyId,
-        crime_score: score,
-        raw_data: rawData,
-        refreshed_at: now,
-      }, { onConflict: "property_id" });
-
+      .upsert({ property_id: propertyId, crime_score: score, raw_data: rawData, refreshed_at: now }, { onConflict: "property_id" });
     if (areaError) throw areaError;
 
     await finishRun("succeeded", {
-      outcome: "matched",
-      score,
-      latestMonth,
-      months,
-      totalCrimes,
+      outcome: "matched", score, latestMonth, months, totalCrimes,
       monthlyAverage: Math.round(monthlyAverage * 100) / 100,
       weightedMonthlyAverage: Math.round(weightedMonthlyAverage * 100) / 100,
-      radiusMetres: RADIUS_METRES,
-      topCategories,
+      radiusMetres: RADIUS_METRES, topCategories, requestMode: "serial"
     });
 
     return json({
-      status: "matched",
-      score,
-      latestMonth,
-      totalCrimes,
+      status: "matched", score, latestMonth, totalCrimes,
       monthlyAverage: Math.round(monthlyAverage * 100) / 100,
       weightedMonthlyAverage: Math.round(weightedMonthlyAverage * 100) / 100,
-      topCategories,
-      property: updatedProperty,
+      topCategories, property: updatedProperty,
     });
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      const retryAfter = error.retryAfter;
+      const { data: updated } = await supabase
+        .from("properties")
+        .update({ crime_status: "pending" })
+        .eq("id", propertyId)
+        .select("*")
+        .single();
+      await finishRun("succeeded", { outcome: "rate_limited", retryAfter, requestMode: "serial" });
+      return json({ status: "rate_limited", retryAfter, property: updated });
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     const now = new Date().toISOString();
     await supabase.from("properties").update({ crime_status: "error", crime_enriched_at: now }).eq("id", propertyId);
