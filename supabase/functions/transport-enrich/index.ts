@@ -9,7 +9,9 @@ const QMC = {
   latitude: 52.943799,
   longitude: -1.185957,
 };
-const ATCO_AREAS = ["330", "339", "327", "329"]; // Nottinghamshire, Nottingham, Derbyshire, Derby
+
+const BUS_ATCO_AREAS = ["330", "339", "100", "109"]; // Nottinghamshire, Nottingham, Derbyshire, Derby
+const RAIL_ATCO_AREA = "910"; // National rail
 const RUN_GUARD_MS = 2 * 60 * 1000;
 
 const corsHeaders = {
@@ -48,6 +50,15 @@ function round2(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+function normaliseStopName(value: unknown) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
 function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) {
   const r = 3958.7613;
   const toRad = (degrees: number) => degrees * Math.PI / 180;
@@ -59,7 +70,7 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/1.5" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/1.6" },
   });
   const text = await response.text();
   let data: any = null;
@@ -83,6 +94,7 @@ async function resolveLocation(postcode: unknown, existingLat: unknown, existing
   const resolvedLat = numberOrNull(result?.latitude);
   const resolvedLng = numberOrNull(result?.longitude);
   if (resolvedLat === null || resolvedLng === null) return null;
+
   return {
     latitude: resolvedLat,
     longitude: resolvedLng,
@@ -159,13 +171,14 @@ function headerIndex(headers: string[], name: string) {
 
 async function loadNaptanArea(areaCode: string, latitude: number, longitude: number) {
   const response = await fetch(`${NAPTAN_API}?dataFormat=CSV&atcoAreaCodes=${encodeURIComponent(areaCode)}`, {
-    headers: { Accept: "text/csv", "User-Agent": "House-Ranker/1.5" },
+    headers: { Accept: "text/csv", "User-Agent": "House-Ranker/1.6" },
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`${response.status} loading NaPTAN area ${areaCode}: ${text.slice(0, 220)}`);
 
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (!lines.length) return { rail: [], bus: [] };
+
   const headers = parseCsvLine(lines[0]);
   if (headers[0]) headers[0] = headers[0].replace(/^\uFEFF/, "");
   const idx = {
@@ -176,6 +189,7 @@ async function loadNaptanArea(areaCode: string, latitude: number, longitude: num
     status: headerIndex(headers, "Status"),
     atco: headerIndex(headers, "ATCOCode"),
   };
+
   if (idx.name < 0 || idx.lat < 0 || idx.lon < 0 || idx.type < 0) {
     throw new Error(`NaPTAN area ${areaCode} returned an unexpected CSV schema`);
   }
@@ -186,11 +200,14 @@ async function loadNaptanArea(areaCode: string, latitude: number, longitude: num
     const row = parseCsvLine(lines[i]);
     const status = idx.status >= 0 ? String(row[idx.status] || "").trim().toLowerCase() : "active";
     if (status && status !== "active") continue;
+
     const stopLat = numberOrNull(row[idx.lat]);
     const stopLon = numberOrNull(row[idx.lon]);
     if (stopLat === null || stopLon === null) continue;
+
     const distanceMiles = haversineMiles(latitude, longitude, stopLat, stopLon);
     if (!Number.isFinite(distanceMiles) || distanceMiles > 20) continue;
+
     const stop = {
       name: String(row[idx.name] || "Unnamed stop").trim(),
       atcoCode: idx.atco >= 0 ? String(row[idx.atco] || "").trim() : "",
@@ -200,42 +217,60 @@ async function loadNaptanArea(areaCode: string, latitude: number, longitude: num
       stopType: String(row[idx.type] || "").trim().toUpperCase(),
       areaCode,
     };
+
     if (stop.stopType === "RSE") rail.push(stop);
     else if (stop.stopType === "BCT") bus.push(stop);
   }
+
   return { rail, bus };
 }
 
+function dedupeByName(stops: any[]) {
+  const map = new Map<string, any>();
+  for (const stop of stops) {
+    const key = normaliseStopName(stop.name) || stop.atcoCode || `${stop.latitude},${stop.longitude}`;
+    const current = map.get(key);
+    if (!current || stop.distanceMiles < current.distanceMiles) map.set(key, stop);
+  }
+  return [...map.values()].sort((a, b) => a.distanceMiles - b.distanceMiles);
+}
+
 async function publicTransport(latitude: number, longitude: number) {
+  const rawBus: any[] = [];
   const rail: any[] = [];
-  const bus: any[] = [];
   const failures: string[] = [];
 
-  for (const areaCode of ATCO_AREAS) {
-    try {
-      const result = await loadNaptanArea(areaCode, latitude, longitude);
-      rail.push(...result.rail);
-      bus.push(...result.bus);
-    } catch (error) {
-      failures.push(`${areaCode}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  const busResults = await Promise.allSettled(
+    BUS_ATCO_AREAS.map(areaCode => loadNaptanArea(areaCode, latitude, longitude))
+  );
+
+  busResults.forEach((result, index) => {
+    const areaCode = BUS_ATCO_AREAS[index];
+    if (result.status === "fulfilled") rawBus.push(...result.value.bus);
+    else failures.push(`${areaCode}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+  });
+
+  try {
+    const result = await loadNaptanArea(RAIL_ATCO_AREA, latitude, longitude);
+    rail.push(...result.rail);
+  } catch (error) {
+    failures.push(`${RAIL_ATCO_AREA}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  rawBus.sort((a, b) => a.distanceMiles - b.distanceMiles);
   rail.sort((a, b) => a.distanceMiles - b.distanceMiles);
-  bus.sort((a, b) => a.distanceMiles - b.distanceMiles);
 
-  const uniqueRail = new Map<string, any>();
-  for (const stop of rail) {
-    const key = stop.name.toLowerCase().replace(/\s+/g, " ");
-    if (!uniqueRail.has(key) || stop.distanceMiles < uniqueRail.get(key).distanceMiles) uniqueRail.set(key, stop);
-  }
-  const nearestRail = [...uniqueRail.values()].sort((a, b) => a.distanceMiles - b.distanceMiles)[0] || null;
-  const nearestBus = bus[0] || null;
-  const busStopsHalfMile = bus.filter(stop => stop.distanceMiles <= 0.5).length;
+  const busLocations = dedupeByName(rawBus);
+  const railStations = dedupeByName(rail);
+  const nearestRail = railStations[0] || null;
+  const nearestBus = busLocations[0] || null;
+
+  const rawBusStopPointsHalfMile = rawBus.filter(stop => stop.distanceMiles <= 0.5).length;
+  const busStopLocationsHalfMile = busLocations.filter(stop => stop.distanceMiles <= 0.5).length;
 
   const rs = nearestRail ? railScore(nearestRail.distanceMiles) : null;
   const bds = nearestBus ? busDistanceScore(nearestBus.distanceMiles) : null;
-  const bcs = busCountScore(busStopsHalfMile);
+  const bcs = busCountScore(busStopLocationsHalfMile);
 
   let score: number | null = null;
   let status = "error";
@@ -255,7 +290,9 @@ async function publicTransport(latitude: number, longitude: number) {
     score,
     nearestRail,
     nearestBus,
-    busStopsHalfMile,
+    busStopsHalfMile: busStopLocationsHalfMile,
+    busStopLocationsHalfMile,
+    rawBusStopPointsHalfMile,
     railScore: rs,
     busDistanceScore: bds,
     busCountScore: bcs,
@@ -267,14 +304,16 @@ async function qmcRoute(latitude: number, longitude: number) {
   const coordinates = `${longitude},${latitude};${QMC.longitude},${QMC.latitude}`;
   const url = `${OSRM_BASE}/route/v1/driving/${coordinates}?overview=false&steps=false`;
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/1.5" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/1.6" },
   });
   const text = await response.text();
   let payload: any = null;
   try { payload = text ? JSON.parse(text) : null; } catch {}
+
   if (!response.ok || payload?.code !== "Ok" || !payload?.routes?.length) {
     throw new Error(`OSRM route unavailable: ${response.status} ${String(payload?.message || text).slice(0, 180)}`);
   }
+
   const route = payload.routes[0];
   const minutes = Math.max(1, Math.round(Number(route.duration || 0) / 60));
   const distanceMiles = round2(Number(route.distance || 0) / 1609.344);
@@ -292,6 +331,7 @@ Deno.serve(async req => {
   const anon = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   let clientKey = anon;
   try { clientKey = JSON.parse(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS") ?? "{}").default || anon; } catch {}
+
   const supabase = createClient(supabaseUrl, clientKey, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: authHeader } },
@@ -324,10 +364,15 @@ Deno.serve(async req => {
     .limit(1);
   if (activeRuns?.length) return json({ status: "already_running", property });
 
-  const startedAt = new Date().toISOString();
   const { data: run } = await supabase
     .from("enrichment_runs")
-    .insert({ property_id: propertyId, source: "transport", status: "running", started_at: startedAt, payload: { destination: QMC.name } })
+    .insert({
+      property_id: propertyId,
+      source: "transport",
+      status: "running",
+      started_at: new Date().toISOString(),
+      payload: { destination: QMC.name, version: "1.1" },
+    })
     .select("id")
     .single();
 
@@ -344,6 +389,7 @@ Deno.serve(async req => {
   try {
     const location = await resolveLocation(property.postcode, property.latitude, property.longitude);
     const now = new Date().toISOString();
+
     if (!location) {
       const { data: updated } = await supabase.from("properties").update({
         commute_status: "needs_location",
@@ -352,6 +398,7 @@ Deno.serve(async req => {
         transport_enriched_at: now,
         updated_at: now,
       }).eq("id", propertyId).select("*").single();
+
       await finishRun("succeeded", { outcome: "needs_location" });
       return json({ status: "needs_location", property: updated });
     }
@@ -365,6 +412,7 @@ Deno.serve(async req => {
     const transport = transportResult.status === "fulfilled" ? transportResult.value : null;
     const commuteStatus = route ? "matched" : "error";
     const transportStatus = transport?.status || "error";
+
     const metrics = { ...(property.metrics || {}) };
     if (route?.score !== undefined) metrics.commute = route.score;
     if (transport?.score !== null && transport?.score !== undefined) metrics.transport = transport.score;
@@ -383,7 +431,7 @@ Deno.serve(async req => {
       transport_nearest_rail_name: transport?.nearestRail?.name ?? null,
       transport_nearest_rail_miles: transport?.nearestRail?.distanceMiles ?? null,
       transport_nearest_bus_miles: transport?.nearestBus?.distanceMiles ?? null,
-      transport_bus_stops_half_mile: transport?.busStopsHalfMile ?? null,
+      transport_bus_stops_half_mile: transport?.busStopLocationsHalfMile ?? null,
       transport_enriched_at: now,
       metrics,
       updated_at: now,
@@ -398,11 +446,19 @@ Deno.serve(async req => {
       .single();
     if (updateError) throw updateError;
 
-    const { data: area } = await supabase.from("area_metrics").select("raw_data").eq("property_id", propertyId).maybeSingle();
+    const { data: area } = await supabase
+      .from("area_metrics")
+      .select("raw_data")
+      .eq("property_id", propertyId)
+      .maybeSingle();
+
     const rawData = {
       ...(area?.raw_data || {}),
       transport: {
-        status: route && transport?.score !== null ? (transportStatus === "matched" ? "matched" : "partial") : "partial",
+        version: "1.1",
+        status: route && transport?.score !== null
+          ? (transportStatus === "matched" ? "matched" : "partial")
+          : "partial",
         locationMethod: location.method,
         destination: QMC,
         commute: route ? {
@@ -413,25 +469,32 @@ Deno.serve(async req => {
           traffic: "No live traffic adjustment",
           formula: "100 up to 20 min; then progressively lower to 0 at 60+ min",
         } : {
-          error: routeResult.status === "rejected" ? String(routeResult.reason?.message || routeResult.reason) : "Unavailable",
+          error: routeResult.status === "rejected"
+            ? String(routeResult.reason?.message || routeResult.reason)
+            : "Unavailable",
         },
         publicTransport: transport ? {
           score: transport.score,
           nearestRail: transport.nearestRail,
           nearestBus: transport.nearestBus,
-          busStopsHalfMile: transport.busStopsHalfMile,
+          busStopsHalfMile: transport.busStopLocationsHalfMile,
+          busStopLocationsHalfMile: transport.busStopLocationsHalfMile,
+          rawBusStopPointsHalfMile: transport.rawBusStopPointsHalfMile,
           componentScores: {
             rail: transport.railScore,
             busDistance: transport.busDistanceScore,
             busCount: transport.busCountScore,
           },
           source: "Department for Transport NaPTAN",
-          atcoAreas: ATCO_AREAS,
-          formula: "50% rail proximity + 20% nearest bus stop + 30% bus stops within 0.5 mile when both rail and bus data are available",
-          limitations: "V1 measures access, not timetable frequency or punctuality. NaPTAN areas are currently scoped to the QMC East Midlands search corridor.",
+          busAtcoAreas: BUS_ATCO_AREAS,
+          railAtcoArea: RAIL_ATCO_AREA,
+          formula: "50% rail proximity + 20% nearest bus stop + 30% distinct bus stop locations within 0.5 mile",
+          limitations: "V1.1 measures access, not timetable frequency or punctuality. Bus stop counts are deduplicated by CommonName; national rail stations come from ATCO area 910.",
           failures: transport.failures,
         } : {
-          error: transportResult.status === "rejected" ? String(transportResult.reason?.message || transportResult.reason) : "Unavailable",
+          error: transportResult.status === "rejected"
+            ? String(transportResult.reason?.message || transportResult.reason)
+            : "Unavailable",
         },
       },
     };
@@ -445,21 +508,34 @@ Deno.serve(async req => {
     if (areaError) throw areaError;
 
     const failures: string[] = [];
-    if (!route) failures.push(`Commute: ${routeResult.status === "rejected" ? String(routeResult.reason?.message || routeResult.reason) : "Unavailable"}`);
-    if (!transport) failures.push(`Transport: ${transportResult.status === "rejected" ? String(transportResult.reason?.message || transportResult.reason) : "Unavailable"}`);
-    else failures.push(...transport.failures.map((failure: string) => `NaPTAN ${failure}`));
+    if (!route) {
+      failures.push(`Commute: ${routeResult.status === "rejected" ? String(routeResult.reason?.message || routeResult.reason) : "Unavailable"}`);
+    }
+    if (!transport) {
+      failures.push(`Transport: ${transportResult.status === "rejected" ? String(transportResult.reason?.message || transportResult.reason) : "Unavailable"}`);
+    } else {
+      failures.push(...transport.failures.map((failure: string) => `NaPTAN ${failure}`));
+    }
 
-    const overallStatus = route && transport?.score !== null ? (transportStatus === "matched" ? "matched" : "partial") : "partial";
+    const overallStatus = route && transport?.score !== null
+      ? (transportStatus === "matched" ? "matched" : "partial")
+      : "partial";
+
     await finishRun("succeeded", {
       outcome: overallStatus,
+      version: "1.1",
       commuteMinutes: route?.minutes ?? null,
       commuteScore: route?.score ?? null,
       transportScore: transport?.score ?? null,
+      nearestRail: transport?.nearestRail ?? null,
+      busStopLocationsHalfMile: transport?.busStopLocationsHalfMile ?? null,
+      rawBusStopPointsHalfMile: transport?.rawBusStopPointsHalfMile ?? null,
       failures,
     }, failures.length ? failures.join(" | ") : null);
 
     return json({
       status: overallStatus,
+      version: "1.1",
       commuteStatus,
       transportStatus,
       commuteMinutes: route?.minutes ?? null,
@@ -468,7 +544,8 @@ Deno.serve(async req => {
       transportScore: transport?.score ?? null,
       nearestRail: transport?.nearestRail ?? null,
       nearestBus: transport?.nearestBus ?? null,
-      busStopsHalfMile: transport?.busStopsHalfMile ?? null,
+      busStopsHalfMile: transport?.busStopLocationsHalfMile ?? null,
+      rawBusStopPointsHalfMile: transport?.rawBusStopPointsHalfMile ?? null,
       property: updated,
       failures,
     });
@@ -482,7 +559,7 @@ Deno.serve(async req => {
       transport_enriched_at: now,
       updated_at: now,
     }).eq("id", propertyId);
-    await finishRun("failed", { outcome: "error" }, message);
+    await finishRun("failed", { outcome: "error", version: "1.1" }, message);
     return json({ error: "Transport lookup failed", detail: message }, 502);
   }
 });
