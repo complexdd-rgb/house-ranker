@@ -6,6 +6,7 @@
   <meta name="description" content="House Ranker — compare shortlisted homes with transparent scores." />
   <title>House Ranker</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="auth.css" />
 </head>
 <body>
   <header class="topbar">
@@ -16,11 +17,17 @@
         <small>Find the home that fits you best</small>
       </span>
     </a>
-    <nav class="nav" aria-label="Primary">
-      <button class="nav-btn active" data-view="dashboard">Dashboard</button>
-      <button class="nav-btn" data-view="add">Add house</button>
-      <button class="nav-btn" data-view="settings">Scoring</button>
-    </nav>
+    <div class="top-actions">
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-btn active" data-view="dashboard">Dashboard</button>
+        <button class="nav-btn" data-view="add">Add house</button>
+        <button class="nav-btn" data-view="settings">Scoring</button>
+      </nav>
+      <div class="auth-area">
+        <span id="authLabel" class="auth-label">Local demo</span>
+        <button id="authButton" class="ghost" type="button">Sign in</button>
+      </div>
+    </div>
   </header>
 
   <main class="shell">
@@ -57,7 +64,7 @@
         <div>
           <p class="eyebrow">ADD TO SHORTLIST</p>
           <h1>Add a property</h1>
-          <p class="muted">For V1, paste the listing URL and confirm the basics. Automated neighbourhood enrichment comes next.</p>
+          <p class="muted">Paste the listing URL and confirm the basics. Automated neighbourhood enrichment comes next.</p>
         </div>
       </div>
 
@@ -176,7 +183,32 @@
     <div id="propertyDetail"></div>
   </dialog>
 
+  <dialog id="authDialog" class="auth-dialog">
+    <button id="closeAuthDialog" class="dialog-close" aria-label="Close">×</button>
+    <div class="auth-dialog-content">
+      <p class="eyebrow">HOUSE RANKER ACCOUNT</p>
+      <h2>Sync your shortlist</h2>
+      <p class="muted">Sign in to keep your houses, scoring weights and deal-breakers in your private Supabase account.</p>
+      <form id="authForm">
+        <label>Email
+          <input id="authEmail" type="email" autocomplete="email" required placeholder="you@example.com" />
+        </label>
+        <label>Password
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" required />
+        </label>
+        <p id="authMessage" class="auth-message">Use an existing account or create one below.</p>
+        <div class="auth-actions">
+          <button id="signUpButton" class="ghost" type="button">Create account</button>
+          <button class="primary" type="submit">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
