@@ -110,7 +110,7 @@
         ? Math.round(transport.busStopsHalfMile)
         : null;
       const busText = transport.nearestBusMiles !== null && transport.nearestBusMiles !== undefined
-        ? `${miles(transport.nearestBusMiles)}${busStops !== null ? ` · ${busStops} stops ≤0.5 mi` : ''}`
+        ? `${miles(transport.nearestBusMiles)}${busStops !== null ? ` · ${busStops} stop locations ≤0.5 mi` : ''}`
         : '—';
 
       return `
@@ -137,7 +137,7 @@
               <p class="muted">${raw?.publicTransport?.formula ? escapeHtml(raw.publicTransport.formula) : 'Rail proximity, nearest bus stop and nearby bus-stop choice.'}</p>
             </div>
           </div>
-          <p class="muted transport-footnote">QMC drive time uses OSRM/OpenStreetMap routing and does not include live traffic. Public transport access uses Department for Transport NaPTAN stop locations; V1 measures access, not service frequency, punctuality or public-transport journey times.</p>
+          <p class="muted transport-footnote">QMC drive time uses OSRM/OpenStreetMap routing and does not include live traffic. Public transport access uses Department for Transport NaPTAN stop locations. V1.1 uses national rail data and deduplicates bus boarding points by stop name; it measures access, not service frequency, punctuality or public-transport journey times.</p>
           <button class="ghost transport-retry" type="button" data-transport-retry="${property.id}">Refresh transport data</button>
         </section>`;
     }
