@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="House Ranker — compare shortlisted homes with transparent scores." />
+  <title>House Ranker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#dashboard" aria-label="House Ranker home">
+      <span class="brand-mark">HR</span>
+      <span>
+        <strong>House Ranker</strong>
+        <small>Find the home that fits you best</small>
+      </span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <button class="nav-btn active" data-view="dashboard">Dashboard</button>
+      <button class="nav-btn" data-view="add">Add house</button>
+      <button class="nav-btn" data-view="settings">Scoring</button>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section id="dashboard" class="view active">
+      <div class="hero panel">
+        <div>
+          <p class="eyebrow">YOUR SHORTLIST</p>
+          <h1>Which house should you buy?</h1>
+          <p class="muted">Every property is scored using the same transparent rules, then re-ranked around what matters most to you.</p>
+        </div>
+        <button class="primary" data-go="add">+ Add a property</button>
+      </div>
+
+      <div class="summary-grid" id="summaryGrid"></div>
+
+      <section class="panel leaderboard-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LIVE RANKING</p>
+            <h2>Your house leaderboard</h2>
+          </div>
+          <div class="segmented" role="group" aria-label="Sort properties">
+            <button class="sort-btn active" data-sort="yourScore">Your score</button>
+            <button class="sort-btn" data-sort="houseScore">House score</button>
+            <button class="sort-btn" data-sort="price">Price</button>
+          </div>
+        </div>
+        <div id="leaderboard" class="leaderboard"></div>
+      </section>
+    </section>
+
+    <section id="add" class="view">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">ADD TO SHORTLIST</p>
+          <h1>Add a property</h1>
+          <p class="muted">For V1, paste the listing URL and confirm the basics. Automated neighbourhood enrichment comes next.</p>
+        </div>
+      </div>
+
+      <form id="propertyForm" class="panel form-card">
+        <div class="form-section">
+          <h2>Listing</h2>
+          <div class="form-grid two">
+            <label class="wide">Listing URL
+              <input id="listingUrl" type="url" placeholder="https://www.rightmove.co.uk/properties/..." />
+            </label>
+            <label class="wide">Address
+              <input id="address" required placeholder="e.g. Example Road, Nottingham" />
+            </label>
+            <label>Asking price (£)
+              <input id="price" type="number" min="0" step="1000" required placeholder="325000" />
+            </label>
+            <label>Bedrooms
+              <input id="bedrooms" type="number" min="0" max="20" required value="4" />
+            </label>
+            <label>Property type
+              <select id="propertyType">
+                <option>Detached</option>
+                <option>Semi-detached</option>
+                <option>Terraced</option>
+                <option>Bungalow</option>
+                <option>Flat</option>
+                <option>Other</option>
+              </select>
+            </label>
+            <label>Commute (minutes)
+              <input id="commute" type="number" min="0" max="240" value="30" />
+            </label>
+            <label>Flood risk
+              <select id="floodRisk">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label class="checkbox-label"><input id="parking" type="checkbox" checked /> Off-street parking</label>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-heading compact">
+            <div>
+              <h2>V1 scoring inputs</h2>
+              <p class="muted">These are manual 0–100 inputs for now. We’ll replace them with real data sources one by one.</p>
+            </div>
+          </div>
+          <div class="metric-inputs" id="metricInputs"></div>
+        </div>
+
+        <div class="form-actions">
+          <button type="button" class="ghost" data-go="dashboard">Cancel</button>
+          <button class="primary" type="submit">Add to shortlist</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="settings" class="view">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">PERSONALISE</p>
+          <h1>Your scoring rules</h1>
+          <p class="muted">Change the weights and every house is re-ranked instantly. Deal-breakers are shown separately rather than hidden inside an average.</p>
+        </div>
+      </div>
+
+      <div class="settings-layout">
+        <form id="weightsForm" class="panel form-card">
+          <div class="section-heading compact">
+            <div>
+              <h2>Your score weights</h2>
+              <p class="muted">Weights must total 100.</p>
+            </div>
+            <div id="weightTotal" class="weight-total">100%</div>
+          </div>
+          <div id="weightControls" class="weight-controls"></div>
+          <div class="form-actions">
+            <button type="button" id="resetWeights" class="ghost">Reset</button>
+            <button type="submit" class="primary">Save weights</button>
+          </div>
+        </form>
+
+        <form id="rulesForm" class="panel form-card">
+          <div class="section-heading compact">
+            <div>
+              <h2>Deal-breakers</h2>
+              <p class="muted">A house can still rank well, but these warnings stay visible.</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <label>Maximum budget (£)
+              <input id="maxBudget" type="number" min="0" step="5000" />
+            </label>
+            <label>Minimum bedrooms
+              <input id="minBedrooms" type="number" min="0" max="20" />
+            </label>
+            <label>Maximum commute (minutes)
+              <input id="maxCommute" type="number" min="0" max="240" />
+            </label>
+            <label class="checkbox-label"><input id="avoidHighFlood" type="checkbox" /> Avoid high flood risk</label>
+            <label class="checkbox-label"><input id="requireParking" type="checkbox" /> Parking required</label>
+          </div>
+          <div class="form-actions">
+            <button class="primary" type="submit">Save deal-breakers</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="propertyDialog" class="property-dialog">
+    <button id="closeDialog" class="dialog-close" aria-label="Close">×</button>
+    <div id="propertyDetail"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
