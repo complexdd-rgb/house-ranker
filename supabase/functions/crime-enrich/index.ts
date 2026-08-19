@@ -6,21 +6,22 @@ const SOURCE = "Police.uk street-level crime API";
 const MONTHS = 6;
 const RADIUS_METRES = 1000;
 const REQUEST_SPACING_MS = 450;
+const RUN_GUARD_MS = 120000;
 
 const CATEGORY_WEIGHTS: Record<string, number> = {
   "violent-crime": 2.0,
-  "robbery": 2.5,
-  "burglary": 2.0,
+  robbery: 2.5,
+  burglary: 2.0,
   "possession-of-weapons": 2.5,
   "vehicle-crime": 1.5,
   "criminal-damage-arson": 1.5,
   "theft-from-person": 1.5,
-  "drugs": 1.2,
+  drugs: 1.2,
   "public-order": 1.1,
   "anti-social-behaviour": 0.75,
   "bicycle-theft": 0.75,
   "other-theft": 0.75,
-  "shoplifting": 0.5,
+  shoplifting: 0.5,
   "other-crime": 1.0
 };
 
@@ -98,30 +99,38 @@ class RateLimitError extends Error {
 }
 
 async function fetchJson(url: string, { police = false }: { police?: boolean } = {}) {
-  const response = await fetch(url, {
-    headers: { "Accept": "application/json", "User-Agent": "House-Ranker/1.1" },
-  });
+  const maxAttempts = police ? 2 : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const response = await fetch(url, {
+      headers: { "Accept": "application/json", "User-Agent": "House-Ranker/1.2" },
+    });
 
-  if (response.status === 429 && police) {
-    const text = await response.text();
-    let bodyRetry: number | null = null;
-    try {
-      const parsed = JSON.parse(text);
-      const parsedRetry = Number(parsed?.retry_after);
-      if (Number.isFinite(parsedRetry)) bodyRetry = parsedRetry;
-    } catch {}
-    const headerRetry = Number(response.headers.get("retry-after"));
-    const retryAfter = Math.max(5, Math.min(120,
-      Number.isFinite(headerRetry) && headerRetry > 0 ? headerRetry : (bodyRetry ?? 30)
-    ));
-    throw new RateLimitError(retryAfter);
-  }
+    if (response.status === 429 && police) {
+      const text = await response.text();
+      let bodyRetry: number | null = null;
+      try {
+        const parsed = JSON.parse(text);
+        const parsedRetry = Number(parsed?.retry_after);
+        if (Number.isFinite(parsedRetry)) bodyRetry = parsedRetry;
+      } catch {}
+      const headerRetry = Number(response.headers.get("retry-after"));
+      const retryAfter = Math.max(5, Math.min(60,
+        Number.isFinite(headerRetry) && headerRetry > 0 ? headerRetry : (bodyRetry ?? 30)
+      ));
+      if (attempt === 0) {
+        await sleep((retryAfter + 1) * 1000);
+        continue;
+      }
+      throw new RateLimitError(retryAfter);
+    }
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`${response.status} from ${new URL(url).hostname}: ${body.slice(0, 240)}`);
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`${response.status} from ${new URL(url).hostname}: ${body.slice(0, 240)}`);
+    }
+    return response.json();
   }
-  return response.json();
+  throw new Error("Request failed");
 }
 
 async function resolveCoordinates(postcode: string, existingLat: unknown, existingLng: unknown) {
@@ -129,7 +138,6 @@ async function resolveCoordinates(postcode: string, existingLat: unknown, existi
   const lng = toNumber(existingLng);
   if (lat !== null && lng !== null) return { lat, lng, method: "listing_coordinates" };
   if (!isFullPostcode(postcode)) return null;
-
   const compact = postcode.replace(/\s+/g, "");
   const payload = await fetchJson(`${POSTCODE_API}/${encodeURIComponent(compact)}`);
   const result = payload?.result;
@@ -188,8 +196,22 @@ Deno.serve(async (req: Request) => {
     .select("id,address,postcode,latitude,longitude,metrics,crime_status,crime_enriched_at")
     .eq("id", propertyId)
     .single();
-
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
+
+  const activeSince = new Date(Date.now() - RUN_GUARD_MS).toISOString();
+  const { data: activeRuns } = await supabase
+    .from("enrichment_runs")
+    .select("id,started_at")
+    .eq("property_id", propertyId)
+    .eq("source", "crime")
+    .eq("status", "running")
+    .gte("started_at", activeSince)
+    .order("started_at", { ascending: false })
+    .limit(1);
+
+  if (activeRuns?.length) {
+    return json({ status: "already_running", property });
+  }
 
   const startedAt = new Date().toISOString();
   const { data: run } = await supabase
@@ -199,7 +221,7 @@ Deno.serve(async (req: Request) => {
       source: "crime",
       status: "running",
       started_at: startedAt,
-      payload: { postcode: property.postcode || null, radiusMetres: RADIUS_METRES, months: MONTHS, requestMode: "serial" },
+      payload: { postcode: property.postcode || null, radiusMetres: RADIUS_METRES, months: MONTHS, requestMode: "serial_guarded" },
     })
     .select("id")
     .single();
@@ -283,7 +305,6 @@ Deno.serve(async (req: Request) => {
       .eq("id", propertyId)
       .select("*")
       .single();
-
     if (updateError) throw updateError;
 
     const { data: existingAreaMetrics } = await supabase
@@ -311,7 +332,7 @@ Deno.serve(async (req: Request) => {
         categoryTotals,
         topCategories,
         monthlyResults,
-        requestMode: "serial_450ms_spacing",
+        requestMode: "serial_450ms_guarded_retry_once",
         locationNote: "Police.uk street-level coordinates are anonymised/approximate; this score represents the surrounding neighbourhood, not the exact property.",
       },
     };
@@ -325,7 +346,7 @@ Deno.serve(async (req: Request) => {
       outcome: "matched", score, latestMonth, months, totalCrimes,
       monthlyAverage: Math.round(monthlyAverage * 100) / 100,
       weightedMonthlyAverage: Math.round(weightedMonthlyAverage * 100) / 100,
-      radiusMetres: RADIUS_METRES, topCategories, requestMode: "serial"
+      radiusMetres: RADIUS_METRES, topCategories, requestMode: "serial_guarded_retry_once"
     });
 
     return json({
@@ -343,7 +364,7 @@ Deno.serve(async (req: Request) => {
         .eq("id", propertyId)
         .select("*")
         .single();
-      await finishRun("succeeded", { outcome: "rate_limited", retryAfter, requestMode: "serial" });
+      await finishRun("succeeded", { outcome: "rate_limited_after_retry", retryAfter, requestMode: "serial_guarded" });
       return json({ status: "rate_limited", retryAfter, property: updated });
     }
 
