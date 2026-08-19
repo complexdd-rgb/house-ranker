@@ -1,0 +1,2 @@
+-- No-op migration retained so the repository migration history matches the remote Supabase project.
+-- The schools enrichment fields were already applied in 20260819145006.
