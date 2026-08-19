@@ -68,6 +68,12 @@ const state = {
   sortKey: 'yourScore'
 };
 
+const cloud = {
+  client: null,
+  session: null,
+  hydrating: false
+};
+
 function load(key, fallback) {
   try {
     const value = localStorage.getItem(key);
@@ -79,6 +85,13 @@ function load(key, fallback) {
 
 function save(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function saveGuestState() {
+  if (cloud.session) return;
+  save(STORAGE.properties, state.properties);
+  save(STORAGE.weights, state.weights);
+  save(STORAGE.rules, state.rules);
 }
 
 function score(metrics, weights) {
@@ -279,9 +292,20 @@ function openDetail(id) {
   document.getElementById('propertyDialog').showModal();
 }
 
-function deleteProperty(id) {
+async function deleteProperty(id) {
+  const property = state.properties.find(p => p.id === id);
+  if (!property) return;
+
+  if (cloud.session && !property.demo) {
+    const { error } = await cloud.client.from('properties').delete().eq('id', id);
+    if (error) {
+      toast(`Could not remove property: ${error.message}`);
+      return;
+    }
+  }
+
   state.properties = state.properties.filter(p => p.id !== id);
-  save(STORAGE.properties, state.properties);
+  saveGuestState();
   document.getElementById('propertyDialog').close();
   renderDashboard();
   toast('Property removed');
@@ -298,10 +322,10 @@ document.querySelectorAll('.sort-btn').forEach(button => button.addEventListener
   renderDashboard();
 }));
 
-document.getElementById('propertyForm').addEventListener('submit', event => {
+document.getElementById('propertyForm').addEventListener('submit', async event => {
   event.preventDefault();
   const metrics = Object.fromEntries(CATEGORIES.map(([key]) => [key, Number(document.getElementById(`metric-${key}`).value)]));
-  const property = {
+  let property = {
     id: crypto.randomUUID(),
     demo: false,
     listingUrl: document.getElementById('listingUrl').value.trim(),
@@ -315,8 +339,24 @@ document.getElementById('propertyForm').addEventListener('submit', event => {
     metrics,
     createdAt: new Date().toISOString()
   };
+
+  if (cloud.session) {
+    const { data, error } = await cloud.client
+      .from('properties')
+      .insert(toDbProperty(property, cloud.session.user.id))
+      .select()
+      .single();
+
+    if (error) {
+      toast(`Could not save house: ${error.message}`);
+      return;
+    }
+    property = fromDbProperty(data);
+    state.properties = state.properties.filter(p => !p.demo);
+  }
+
   state.properties.push(property);
-  save(STORAGE.properties, state.properties);
+  saveGuestState();
   event.currentTarget.reset();
   document.getElementById('bedrooms').value = 4;
   document.getElementById('commute').value = 30;
@@ -327,10 +367,10 @@ document.getElementById('propertyForm').addEventListener('submit', event => {
   });
   renderDashboard();
   showView('dashboard');
-  toast('House added to your shortlist');
+  toast(cloud.session ? 'House saved and synced' : 'House added locally');
 });
 
-document.getElementById('weightsForm').addEventListener('submit', event => {
+document.getElementById('weightsForm').addEventListener('submit', async event => {
   event.preventDefault();
   const next = currentFormWeights();
   const total = Object.values(next).reduce((a,b) => a + b, 0);
@@ -339,20 +379,22 @@ document.getElementById('weightsForm').addEventListener('submit', event => {
     return;
   }
   state.weights = next;
-  save(STORAGE.weights, state.weights);
+  saveGuestState();
+  const ok = await saveCloudPreferences();
   renderDashboard();
-  toast('Scoring weights saved');
+  toast(ok ? (cloud.session ? 'Scoring weights saved and synced' : 'Scoring weights saved') : 'Weights saved locally; cloud sync failed');
 });
 
-document.getElementById('resetWeights').addEventListener('click', () => {
+document.getElementById('resetWeights').addEventListener('click', async () => {
   state.weights = { ...DEFAULT_WEIGHTS };
-  save(STORAGE.weights, state.weights);
+  saveGuestState();
   renderWeightControls();
   renderDashboard();
+  await saveCloudPreferences();
   toast('Weights reset to V1 defaults');
 });
 
-document.getElementById('rulesForm').addEventListener('submit', event => {
+document.getElementById('rulesForm').addEventListener('submit', async event => {
   event.preventDefault();
   state.rules = {
     maxBudget: Number(document.getElementById('maxBudget').value || 0),
@@ -361,9 +403,10 @@ document.getElementById('rulesForm').addEventListener('submit', event => {
     avoidHighFlood: document.getElementById('avoidHighFlood').checked,
     requireParking: document.getElementById('requireParking').checked
   };
-  save(STORAGE.rules, state.rules);
+  saveGuestState();
+  const ok = await saveCloudPreferences();
   renderDashboard();
-  toast('Deal-breakers saved');
+  toast(ok ? (cloud.session ? 'Deal-breakers saved and synced' : 'Deal-breakers saved') : 'Deal-breakers saved locally; cloud sync failed');
 });
 
 function toast(message) {
@@ -371,7 +414,7 @@ function toast(message) {
   el.textContent = message;
   el.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.remove('show'), 2200);
+  toast.timer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
 function escapeHtml(value) {
@@ -382,7 +425,263 @@ function escapeAttribute(value) {
   return escapeHtml(value);
 }
 
+function toDbProperty(property, userId) {
+  return {
+    id: property.id,
+    user_id: userId,
+    listing_url: property.listingUrl || null,
+    address: property.address,
+    price: property.price,
+    bedrooms: property.bedrooms,
+    property_type: property.propertyType,
+    commute_minutes: property.commute,
+    flood_risk: property.floodRisk || 'unknown',
+    parking: Boolean(property.parking),
+    metrics: property.metrics || {},
+    created_at: property.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function fromDbProperty(row) {
+  return {
+    id: row.id,
+    demo: false,
+    listingUrl: row.listing_url || '',
+    address: row.address,
+    price: Number(row.price || 0),
+    bedrooms: Number(row.bedrooms || 0),
+    propertyType: row.property_type || 'Other',
+    commute: Number(row.commute_minutes || 0),
+    floodRisk: row.flood_risk || 'unknown',
+    parking: Boolean(row.parking),
+    metrics: row.metrics || {},
+    createdAt: row.created_at
+  };
+}
+
+async function saveCloudPreferences() {
+  if (!cloud.session || !cloud.client) return true;
+  const { error } = await cloud.client
+    .from('user_preferences')
+    .upsert({
+      user_id: cloud.session.user.id,
+      weights: state.weights,
+      rules: state.rules,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id' });
+  if (error) {
+    console.error('Preference sync failed', error);
+    return false;
+  }
+  return true;
+}
+
+async function hydrateFromCloud() {
+  if (!cloud.session || cloud.hydrating) return;
+  cloud.hydrating = true;
+  updateAuthUi('Syncing…');
+
+  try {
+    const userId = cloud.session.user.id;
+    const guestProperties = load(STORAGE.properties, DEMO_PROPERTIES).filter(p => !p.demo);
+
+    const { data: existingProperties, error: propertyError } = await cloud.client
+      .from('properties')
+      .select('*')
+      .order('created_at', { ascending: true });
+
+    if (propertyError) throw propertyError;
+
+    let rows = existingProperties || [];
+
+    if (!rows.length && guestProperties.length) {
+      const payload = guestProperties.map(property => toDbProperty(property, userId));
+      const { data: imported, error: importError } = await cloud.client
+        .from('properties')
+        .insert(payload)
+        .select('*');
+
+      if (importError) throw importError;
+      rows = imported || [];
+      save(STORAGE.properties, DEMO_PROPERTIES);
+      toast(`Imported ${rows.length} local house${rows.length === 1 ? '' : 's'} to your account`);
+    }
+
+    const { data: preferences, error: preferenceError } = await cloud.client
+      .from('user_preferences')
+      .select('weights,rules')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (preferenceError) throw preferenceError;
+
+    if (preferences) {
+      state.weights = { ...DEFAULT_WEIGHTS, ...(preferences.weights || {}) };
+      state.rules = { ...DEFAULT_RULES, ...(preferences.rules || {}) };
+    } else {
+      const { error: createPreferenceError } = await cloud.client
+        .from('user_preferences')
+        .insert({
+          user_id: userId,
+          weights: state.weights,
+          rules: state.rules,
+          updated_at: new Date().toISOString()
+        });
+      if (createPreferenceError) throw createPreferenceError;
+    }
+
+    state.properties = rows.map(fromDbProperty);
+    renderWeightControls();
+    renderRules();
+    renderDashboard();
+  } catch (error) {
+    console.error('Cloud hydration failed', error);
+    toast(`Cloud sync failed: ${error.message || 'unknown error'}`);
+  } finally {
+    cloud.hydrating = false;
+    updateAuthUi();
+  }
+}
+
+function restoreGuestMode() {
+  state.properties = load(STORAGE.properties, DEMO_PROPERTIES);
+  state.weights = load(STORAGE.weights, DEFAULT_WEIGHTS);
+  state.rules = load(STORAGE.rules, DEFAULT_RULES);
+  renderWeightControls();
+  renderRules();
+  renderDashboard();
+}
+
+function updateAuthUi(overrideText = '') {
+  const label = document.getElementById('authLabel');
+  const button = document.getElementById('authButton');
+
+  if (!cloud.client) {
+    label.textContent = 'Local demo';
+    button.textContent = 'Cloud unavailable';
+    button.disabled = true;
+    return;
+  }
+
+  if (cloud.session) {
+    const email = cloud.session.user.email || 'Signed in';
+    label.textContent = overrideText || `Synced · ${email}`;
+    button.textContent = 'Sign out';
+    button.disabled = false;
+  } else {
+    label.textContent = overrideText || 'Local demo';
+    button.textContent = 'Sign in';
+    button.disabled = false;
+  }
+}
+
+function setAuthMessage(message, isError = false) {
+  const el = document.getElementById('authMessage');
+  el.textContent = message;
+  el.classList.toggle('error', isError);
+}
+
+async function initCloud() {
+  const config = window.HOUSE_RANKER_SUPABASE;
+  if (!window.supabase || !config?.url || !config?.publishableKey) {
+    updateAuthUi();
+    return;
+  }
+
+  cloud.client = window.supabase.createClient(config.url, config.publishableKey);
+
+  const { data, error } = await cloud.client.auth.getSession();
+  if (error) {
+    console.error('Could not read Supabase session', error);
+    toast('Cloud sign-in is temporarily unavailable');
+  }
+  cloud.session = data?.session || null;
+  updateAuthUi();
+
+  if (cloud.session) await hydrateFromCloud();
+
+  cloud.client.auth.onAuthStateChange(async (_event, session) => {
+    const wasSignedIn = Boolean(cloud.session);
+    cloud.session = session;
+    updateAuthUi();
+
+    if (session) {
+      await hydrateFromCloud();
+    } else if (wasSignedIn) {
+      restoreGuestMode();
+    }
+  });
+}
+
+document.getElementById('authButton').addEventListener('click', async () => {
+  if (!cloud.client) return;
+
+  if (cloud.session) {
+    const { error } = await cloud.client.auth.signOut();
+    if (error) toast(`Could not sign out: ${error.message}`);
+    else toast('Signed out — back in local demo mode');
+    return;
+  }
+
+  setAuthMessage('Sign in to sync your shortlist and scoring settings across devices.');
+  document.getElementById('authDialog').showModal();
+});
+
+document.getElementById('closeAuthDialog').addEventListener('click', () => document.getElementById('authDialog').close());
+document.getElementById('authDialog').addEventListener('click', event => {
+  if (event.target === event.currentTarget) event.currentTarget.close();
+});
+
+document.getElementById('authForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+
+  setAuthMessage('Signing in…');
+  const { error } = await cloud.client.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    setAuthMessage(error.message, true);
+    return;
+  }
+
+  document.getElementById('authDialog').close();
+  toast('Signed in — loading your shortlist');
+});
+
+document.getElementById('signUpButton').addEventListener('click', async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+
+  if (!email || password.length < 6) {
+    setAuthMessage('Enter an email and a password of at least 6 characters.', true);
+    return;
+  }
+
+  setAuthMessage('Creating account…');
+  const redirectTo = `${window.location.origin}${window.location.pathname}`;
+  const { data, error } = await cloud.client.auth.signUp({
+    email,
+    password,
+    options: { emailRedirectTo: redirectTo }
+  });
+
+  if (error) {
+    setAuthMessage(error.message, true);
+    return;
+  }
+
+  if (data.session) {
+    document.getElementById('authDialog').close();
+    toast('Account created and signed in');
+  } else {
+    setAuthMessage('Account created. Check your email to confirm it, then come back here and sign in.');
+  }
+});
+
 renderMetricInputs();
 renderWeightControls();
 renderRules();
 renderDashboard();
+initCloud();
