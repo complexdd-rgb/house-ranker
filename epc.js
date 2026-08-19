@@ -3,7 +3,7 @@
   let pendingSubmission = null;
 
   function cleanPostcode(value) {
-    const raw = String(value || '').toUpperCase().replace(/\s+/g, '').trim();
+    const raw = String(value || '').toUpperCase().replace(/[\s+]+/g, '').trim();
     if (!raw) return '';
     return raw.length > 3 ? `${raw.slice(0, -3)} ${raw.slice(-3)}` : raw;
   }
@@ -34,6 +34,7 @@
     };
   }
 
+  // Extend the Phase 1 DB mappers without changing the stable core file.
   if (typeof fromDbProperty === 'function') {
     const originalFromDbProperty = fromDbProperty;
     fromDbProperty = function phase2FromDbProperty(row) {
@@ -256,6 +257,7 @@
     const form = document.getElementById('propertyForm');
     if (!form) return;
 
+    // Capture phase runs before the Phase 1 submit handler, so the saved address includes the postcode.
     form.addEventListener('submit', event => {
       if (event.defaultPrevented || !cloud.session) return;
       const addressInput = document.getElementById('address');
@@ -335,6 +337,7 @@
   wireAutomaticEnrichment();
   decorateLeaderboard();
 
+  // initCloud() starts before this file loads. Wait for its client/session, then keep EPC metadata in sync across auth changes.
   const initTimer = setInterval(() => {
     if (!cloud.client) return;
     clearInterval(initTimer);
