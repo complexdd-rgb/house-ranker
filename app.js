@@ -601,14 +601,14 @@ async function initCloud() {
 
   if (cloud.session) await hydrateFromCloud();
 
-  cloud.client.auth.onAuthStateChange(async (_event, session) => {
+  cloud.client.auth.onAuthStateChange((event, session) => {
     const wasSignedIn = Boolean(cloud.session);
     cloud.session = session;
     updateAuthUi();
 
-    if (session) {
-      await hydrateFromCloud();
-    } else if (wasSignedIn) {
+    if (event === 'SIGNED_IN' && session) {
+      setTimeout(() => hydrateFromCloud(), 0);
+    } else if (event === 'SIGNED_OUT' && wasSignedIn) {
       restoreGuestMode();
     }
   });
