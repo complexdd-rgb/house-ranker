@@ -50,22 +50,22 @@
   function transportLabel(property) {
     const commute = property.commuteInfo || {};
     const transport = property.transportInfo || {};
-    const commuteReady = commute.status === 'matched' && commute.minutes !== null && commute.minutes !== undefined;
+    const commuteReady = commute.status === 'matched' && commute.score !== null && commute.score !== undefined;
     const transportReady = ['matched', 'partial'].includes(transport.status) && transport.score !== null && transport.score !== undefined;
 
     if (commuteReady || transportReady) {
       const parts = [];
-      if (commuteReady) parts.push(`QMC ${Math.round(commute.minutes)} min`);
+      if (commuteReady) parts.push(`Commute ${Math.round(commute.score)}/100`);
       if (transportReady) parts.push(`Transport ${Math.round(transport.score)}/100`);
       return { className: transport.status === 'partial' ? 'partial' : 'matched', text: parts.join(' · ') };
     }
     if (commute.status === 'needs_location' || transport.status === 'needs_location') {
-      return { className: 'review', text: 'Transport waiting for location' };
+      return { className: 'review', text: 'Travel data waiting for location' };
     }
     if (commute.status === 'error' && transport.status === 'error') {
-      return { className: 'error', text: 'Transport lookup unavailable' };
+      return { className: 'error', text: 'Travel lookup unavailable' };
     }
-    return { className: 'pending', text: 'Transport lookup pending' };
+    return { className: 'pending', text: 'Travel lookup pending' };
   }
 
   function decorateLeaderboard() {
@@ -98,11 +98,15 @@
     const commute = property.commuteInfo || { status: 'pending' };
     const transport = property.transportInfo || { status: 'pending' };
     const raw = transport.raw || {};
-    const commuteReady = commute.status === 'matched' && commute.minutes !== null && commute.minutes !== undefined;
+    const commuteReady = commute.status === 'matched' && commute.score !== null && commute.score !== undefined;
     const transportReady = ['matched', 'partial'].includes(transport.status) && transport.score !== null && transport.score !== undefined;
 
     if (commuteReady || transportReady) {
-      const score = transportReady ? Math.round(transport.score) : '—';
+      const commuteScore = commuteReady ? `${Math.round(commute.score)}/100` : '—';
+      const transportScore = transportReady ? `${Math.round(transport.score)}/100` : '—';
+      const driveText = commute.minutes !== null && commute.minutes !== undefined
+        ? `${Math.round(commute.minutes)} min${commute.distanceMiles !== null && commute.distanceMiles !== undefined ? ` · ${miles(commute.distanceMiles)}` : ''}`
+        : 'Route unavailable';
       const nearestRail = transport.nearestRailName
         ? `${escapeHtml(transport.nearestRailName)} · ${miles(transport.nearestRailMiles)}`
         : '—';
@@ -116,29 +120,50 @@
       return `
         <section class="transport-detail-card ${escapeHtml(transport.status || commute.status || 'matched')}">
           <div class="transport-detail-heading">
-            <div><p class="eyebrow">AUTOMATIC TRANSPORT DATA</p><h3>Commute & transport</h3></div>
-            <span class="transport-score">${score === '—' ? '—' : `${score}/100`}</span>
+            <div><p class="eyebrow">AUTOMATIC TRAVEL DATA</p><h3>Travel</h3></div>
           </div>
+
+          <div class="travel-score-grid">
+            <div class="travel-score-card commute-card">
+              <div class="travel-score-card-head">
+                <div><small>COMMUTE</small><strong>QMC commute</strong></div>
+                <span class="travel-score-value">${commuteScore}</span>
+              </div>
+              <p>${driveText}</p>
+              <span>Counts as the separate <b>Commute</b> category in your House Score.</span>
+            </div>
+            <div class="travel-score-card public-transport-card">
+              <div class="travel-score-card-head">
+                <div><small>TRANSPORT</small><strong>Public transport access</strong></div>
+                <span class="travel-score-value">${transportScore}</span>
+              </div>
+              <p>${nearestRail !== '—' ? `Rail: ${nearestRail}` : 'Rail station data unavailable'}</p>
+              <span>Counts as the separate <b>Transport</b> category in your House Score.</span>
+            </div>
+          </div>
+
           <div class="transport-summary-grid">
-            <div><small>QMC drive</small><strong>${commuteReady ? `${Math.round(commute.minutes)} min` : '—'}</strong></div>
-            <div><small>Commute score</small><strong>${commute.score !== null && commute.score !== undefined ? `${Math.round(commute.score)}/100` : '—'}</strong></div>
+            <div><small>QMC drive</small><strong>${commute.minutes !== null && commute.minutes !== undefined ? `${Math.round(commute.minutes)} min` : '—'}</strong></div>
+            <div><small>Road distance</small><strong>${miles(commute.distanceMiles)}</strong></div>
             <div><small>Nearest rail</small><strong>${nearestRail}</strong></div>
             <div><small>Bus access</small><strong>${busText}</strong></div>
           </div>
+
           <div class="transport-panels">
             <div class="transport-panel">
-              <small>Drive to Queen's Medical Centre</small>
-              <strong>${commuteReady ? `${Math.round(commute.minutes)} minutes · ${miles(commute.distanceMiles)}` : 'Route unavailable'}</strong>
-              <p class="muted">${escapeHtml(commute.destination || "Queen's Medical Centre, Nottingham")}</p>
+              <small>How Commute is scored</small>
+              <strong>${commuteScore}</strong>
+              <p class="muted">Drive time to ${escapeHtml(commute.destination || "Queen's Medical Centre, Nottingham")}. A 20-minute or shorter route receives 100/100, then the score falls progressively as the journey gets longer.</p>
             </div>
             <div class="transport-panel">
-              <small>Public transport access</small>
-              <strong>${transportReady ? `${Math.round(transport.score)}/100` : 'Access score unavailable'}</strong>
-              <p class="muted">${raw?.publicTransport?.formula ? escapeHtml(raw.publicTransport.formula) : 'Rail proximity, nearest bus stop and nearby bus-stop choice.'}</p>
+              <small>How Transport is scored</small>
+              <strong>${transportScore}</strong>
+              <p class="muted">${raw?.publicTransport?.formula ? escapeHtml(raw.publicTransport.formula) : '50% rail proximity + 20% nearest bus stop + 30% distinct nearby bus-stop locations.'}</p>
             </div>
           </div>
-          <p class="muted transport-footnote">QMC drive time uses OSRM/OpenStreetMap routing and does not include live traffic. Public transport access uses Department for Transport NaPTAN stop locations. V1.1 uses national rail data and deduplicates bus boarding points by stop name; it measures access, not service frequency, punctuality or public-transport journey times.</p>
-          <button class="ghost transport-retry" type="button" data-transport-retry="${property.id}">Refresh transport data</button>
+
+          <p class="muted transport-footnote">Commute and Transport are independent scoring categories. QMC drive time uses OSRM/OpenStreetMap routing without live traffic. Transport uses Department for Transport NaPTAN data; V1.2 recognises national rail stations and local rail entrances, deduplicates nearby bus stops, and measures access rather than service frequency, punctuality or public-transport journey times.</p>
+          <button class="ghost transport-retry" type="button" data-transport-retry="${property.id}">Refresh travel data</button>
         </section>`;
     }
 
@@ -149,16 +174,16 @@
         : 'pending';
     const messages = {
       pending: 'This property is waiting for its first QMC commute and public-transport access lookup.',
-      needs_location: 'House Ranker needs a full postcode or coordinates before it can calculate commute and transport scores.',
-      error: 'The transport lookup could not complete. The property remains saved and can be retried.'
+      needs_location: 'House Ranker needs a full postcode or coordinates before it can calculate Commute and Transport scores.',
+      error: 'The travel lookup could not complete. The property remains saved and can be retried.'
     };
 
     return `
       <section class="transport-detail-card ${status}">
-        <p class="eyebrow">AUTOMATIC TRANSPORT DATA</p>
-        <h3>${status === 'needs_location' ? 'Waiting for location' : status === 'error' ? 'Transport lookup unavailable' : 'Transport lookup pending'}</h3>
+        <p class="eyebrow">AUTOMATIC TRAVEL DATA</p>
+        <h3>${status === 'needs_location' ? 'Waiting for location' : status === 'error' ? 'Travel lookup unavailable' : 'Travel lookup pending'}</h3>
         <p class="muted">${messages[status]}</p>
-        <button class="ghost transport-retry" type="button" data-transport-retry="${property.id}">Try transport lookup again</button>
+        <button class="ghost transport-retry" type="button" data-transport-retry="${property.id}">Try travel lookup again</button>
       </section>`;
   }
 
@@ -198,7 +223,7 @@
 
   async function enrichPropertyTransport(propertyId, { quiet = false } = {}) {
     if (!cloud.client || !cloud.session) {
-      if (!quiet) toast('Sign in to run automatic transport scoring');
+      if (!quiet) toast('Sign in to run automatic travel scoring');
       return { ok: false, code: 'SIGNED_OUT' };
     }
 
@@ -211,7 +236,7 @@
 
     if (error) {
       const payload = await parseFunctionError(error);
-      if (!quiet) toast(`Transport lookup failed: ${payload.detail || payload.error || error.message || 'unknown error'}`);
+      if (!quiet) toast(`Travel lookup failed: ${payload.detail || payload.error || error.message || 'unknown error'}`);
       return { ok: false, code: 'FUNCTION_ERROR', error };
     }
 
@@ -220,13 +245,13 @@
 
     if (!quiet) {
       if (['matched', 'partial'].includes(data?.status)) {
-        const commuteText = data.commuteMinutes !== null && data.commuteMinutes !== undefined ? `QMC ${Math.round(data.commuteMinutes)} min` : 'QMC unavailable';
-        const transportText = data.transportScore !== null && data.transportScore !== undefined ? `transport ${Math.round(data.transportScore)}/100` : 'transport unavailable';
+        const commuteText = data.commuteScore !== null && data.commuteScore !== undefined ? `Commute ${Math.round(data.commuteScore)}/100` : 'Commute unavailable';
+        const transportText = data.transportScore !== null && data.transportScore !== undefined ? `Transport ${Math.round(data.transportScore)}/100` : 'Transport unavailable';
         toast(`${commuteText} · ${transportText}`);
       } else if (data?.status === 'needs_location') {
-        toast('Transport scoring is waiting for a full postcode or property coordinates');
+        toast('Travel scoring is waiting for a full postcode or property coordinates');
       } else if (data?.status === 'already_running') {
-        toast('Transport lookup is already running');
+        toast('Travel lookup is already running');
       }
     }
     return { ok: true, status: data?.status, property };
