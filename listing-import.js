@@ -41,7 +41,18 @@
         return listing;
       }
 
-      const resolution = data.resolution;
+      let resolution = data.resolution;
+
+      if (resolution.status !== 'exact') {
+        status('Cross-checking the house number…', 'working');
+        try {
+          const { data: refineData, error: refineError } = await cloud.client.functions.invoke('address-refine', {
+            body: { listing, resolution }
+          });
+          if (!refineError && refineData?.resolution) resolution = refineData.resolution;
+        } catch {}
+      }
+
       listing.addressResolution = resolution;
       listing.advertisedAddress = resolution.advertisedAddress || listing.address || null;
 
@@ -86,6 +97,7 @@
     const bits = [];
     const resolution = listing.addressResolution || {};
     if (resolution.status === 'exact') bits.push(`exact address ${Math.round(Number(resolution.confidence) || 0)}%`);
+    else if (resolution.status === 'postcode_only' && resolution.refinement?.status === 'needs_review') bits.push('full postcode matched · house number not proven');
     else if (resolution.status === 'postcode_only') bits.push('full postcode matched');
     else if (resolution.status === 'ambiguous') bits.push('house number needs review');
     else if (resolution.status === 'unresolved') bits.push('address not resolved');
@@ -94,8 +106,8 @@
     if (listing.tenure) bits.push(String(listing.tenure).toLowerCase());
     if (listing.councilTaxBand) bits.push(`council tax ${listing.councilTaxBand}`);
     if (listing.floorAreaM2) bits.push(`${Math.round(Number(listing.floorAreaM2))} m²`);
-    const tone = resolution.status === 'ambiguous' || resolution.status === 'unresolved' || resolution.status === 'error' ? 'warning' : 'success';
-    status(`Imported${bits.length ? ` · ${bits.join(' · ')}` : ''}`, tone);
+    const needsReview = resolution.status === 'ambiguous' || resolution.status === 'unresolved' || resolution.status === 'error' || resolution.refinement?.status === 'needs_review';
+    status(`Imported${bits.length ? ` · ${bits.join(' · ')}` : ''}`, needsReview ? 'warning' : 'success');
   }
 
   async function importListing({ quiet = false } = {}) {
