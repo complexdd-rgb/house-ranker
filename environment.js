@@ -53,6 +53,53 @@
     return ({ motorway: 'Motorway', trunk: 'Trunk road', primary: 'Primary road', secondary: 'Secondary road' })[value] || 'Major road';
   }
 
+  function prettyTag(value, fallback = 'Mapped feature') {
+    const key = String(value || '').trim();
+    if (!key) return fallback;
+    const labels = {
+      park: 'Park',
+      nature_reserve: 'Nature reserve',
+      recreation_ground: 'Recreation ground',
+      forest: 'Forest',
+      wood: 'Woodland',
+      heath: 'Heath',
+      grassland: 'Grassland',
+      protected_area: 'Protected area',
+      industrial: 'Industrial land',
+      quarry: 'Quarry',
+      landfill: 'Landfill',
+      waste_disposal: 'Waste disposal',
+      waste_transfer_station: 'Waste transfer station',
+      wastewater_plant: 'Wastewater works',
+      works: 'Works'
+    };
+    return labels[key] || key.replaceAll('_', ' ').replace(/\b\w/g, char => char.toUpperCase());
+  }
+
+  function featureType(tags, fallback) {
+    if (!tags) return fallback;
+    if (tags.leisure) return prettyTag(tags.leisure, fallback);
+    if (tags.landuse) return prettyTag(tags.landuse, fallback);
+    if (tags.natural) return prettyTag(tags.natural, fallback);
+    if (tags.boundary) return prettyTag(tags.boundary, fallback);
+    if (tags.amenity) return prettyTag(tags.amenity, fallback);
+    if (tags.man_made) return prettyTag(tags.man_made, fallback);
+    return fallback;
+  }
+
+  function friendlyFeatureName(name, typeLabel, fallback) {
+    const value = String(name || '').trim();
+    if (!value || value === 'Unnamed' || ['wood', 'industrial', 'forest', 'grassland', 'recreation_ground'].includes(value)) {
+      return typeLabel || fallback;
+    }
+    return value;
+  }
+
+  function floodBandLabel(value) {
+    const text = String(value || '').replaceAll('_', ' ').trim();
+    return text ? text.replace(/\b\w/g, char => char.toUpperCase()) : 'Not available';
+  }
+
   function statusLabel(property) {
     const info = property.environmentInfo || {};
     if (info.status === 'matched' && info.score !== null) {
@@ -104,7 +151,6 @@
     if (!property || property.demo) return '';
     const info = property.environmentInfo || { status: 'pending', components: {} };
     const raw = info.raw || {};
-    const counts = raw.counts || {};
     const components = info.components || {};
     const ready = ['matched', 'partial'].includes(info.status) && info.score !== null;
 
@@ -112,9 +158,11 @@
       const floodDetail = info.status === 'partial'
         ? 'Temporary neutral fallback until flood data is ready'
         : `Environment Agency flood resilience${property.flood?.band ? ` · ${String(property.flood.band).replace('_', ' ')}` : ''}`;
-      const greenName = info.nearestGreenName || raw?.nearest?.green?.name || 'Nearest mapped green space';
+      const greenType = featureType(raw?.nearest?.green?.tags, 'Green/open space');
+      const industrialType = featureType(raw?.nearest?.industrial?.tags, 'No mapped industrial site');
+      const greenName = friendlyFeatureName(info.nearestGreenName || raw?.nearest?.green?.name, greenType, 'Nearest mapped green space');
       const roadName = info.nearestRoadName || raw?.nearest?.road?.name || roadClassLabel(info.nearestRoadClass);
-      const industrialName = info.nearestIndustrialName || raw?.nearest?.industrial?.name || 'No mapped site nearby';
+      const industrialName = friendlyFeatureName(info.nearestIndustrialName || raw?.nearest?.industrial?.name, industrialType, 'No mapped site nearby');
 
       return `
         <section class="environment-detail-card ${escapeHtml(info.status)}">
@@ -131,16 +179,16 @@
           </div>
 
           <div class="environment-summary-grid">
-            <div><small>Green choice</small><strong>${numberOrNull(counts.green2Miles) ?? '—'} ≤2 mi</strong></div>
-            <div><small>Major roads</small><strong>${numberOrNull(counts.majorRoads1Mile) ?? '—'} ≤1 mi</strong></div>
-            <div><small>Industrial sites</small><strong>${numberOrNull(counts.industrial1Mile) ?? '—'} ≤1 mi</strong></div>
+            <div><small>Flood band</small><strong>${escapeHtml(floodBandLabel(property.flood?.band))}</strong></div>
+            <div><small>Green-space type</small><strong>${escapeHtml(greenType)}</strong></div>
             <div><small>Road class</small><strong>${escapeHtml(roadClassLabel(info.nearestRoadClass))}</strong></div>
+            <div><small>Land-use type</small><strong>${escapeHtml(industrialType)}</strong></div>
           </div>
 
           <div class="environment-method">
             <strong>How Environment is scored</strong>
-            <p class="muted">40% flood resilience + 25% green/open-space access + 20% major-road exposure + 15% industrial/land-use exposure. Higher scores mean a more favourable environment.</p>
-            <p class="muted">Flood uses the existing Environment Agency postcode screening. The other parts use OpenStreetMap via Overpass. Major-road distance is a practical noise/air-quality exposure proxy, not a measured pollution or decibel reading.</p>
+            <p class="muted">40% flood resilience + 25% nearest green/open-space access + 20% nearest major-road exposure + 15% nearest industrial/land-use exposure. Higher scores mean a more favourable environment.</p>
+            <p class="muted">Flood uses the existing Environment Agency postcode screening. The other parts use OpenStreetMap via Overpass. Major-road distance is a practical noise/air-quality exposure proxy, not a measured pollution or decibel reading. Raw OpenStreetMap feature counts are not used in the score because a single real place or road can contain many mapped segments.</p>
           </div>
           <button class="ghost environment-retry" type="button" data-environment-retry="${property.id}">Refresh environment</button>
         </section>`;
@@ -273,9 +321,6 @@
     const candidate = state.properties.find(property => {
       if (property.demo) return false;
       const status = property.environmentInfo?.status || 'pending';
-      // A fresh Flood result deliberately marks Environment pending. Allow that
-      // dependency change to trigger a recompute even if Environment already ran
-      // earlier in this browser session.
       if (status === 'pending') return true;
       if (attempted.has(property.id)) return false;
       if (status === 'needs_location' && (property.postcode || (property.latitude !== null && property.longitude !== null))) return true;
