@@ -1,10 +1,11 @@
 import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 
-const VERSION = "1.0";
+const VERSION = "1.1";
 const RUN_GUARD_MS = 60 * 1000;
 const HMLR_ENDPOINT = "https://landregistry.data.gov.uk/landregistry/query";
 const NEUTRAL_MARKET = 60;
 const NEUTRAL_BUDGET = 60;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,13 +28,6 @@ function num(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
-}
-
-function median(values: number[]) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function interpolateScore(ratio: number) {
@@ -79,6 +73,7 @@ function normalizePostcode(value: unknown) {
 
 function postcodeFromProperty(row: any) {
   const candidates = [
+    row?.postcode,
     row?.listing_data?.postcode,
     row?.listing_data?.resolvedAddress,
     row?.listing_data?.address,
@@ -124,7 +119,7 @@ function shapeAdjustment(type: string, areaInput: unknown, bedsInput: unknown) {
   if (area && area > 0) parts.push(Math.sqrt(area / shape.area));
   if (beds && beds > 0) parts.push(Math.pow(beds / shape.beds, 0.25));
   if (!parts.length) return 1;
-  return Math.max(0.85, Math.min(1.20, parts.reduce((a, b) => a + b, 0) / parts.length));
+  return Math.max(0.90, Math.min(1.10, parts.reduce((a, b) => a + b, 0) / parts.length));
 }
 
 function sparqlEscape(value: string) {
@@ -161,17 +156,11 @@ WHERE {
 ORDER BY DESC(?date)
 LIMIT 100`;
 
-  const params = new URLSearchParams({
-    queryLn: "SPARQL",
-    query,
-    limit: "none",
-    infer: "true",
-    output: "json",
-  });
+  const params = new URLSearchParams({ queryLn: "SPARQL", query, limit: "none", infer: "true", output: "json" });
   const response = await fetch(`${HMLR_ENDPOINT}?${params.toString()}`, {
     headers: {
       Accept: "application/sparql-results+json, application/json;q=0.9",
-      "User-Agent": "House-Ranker/1.0 price-value comparable lookup",
+      "User-Agent": "House-Ranker/1.1 price-value comparable lookup",
     },
     signal: AbortSignal.timeout(12000),
   });
@@ -200,23 +189,47 @@ function selectEvidence(rows: Comparable[], targetType: string) {
   const now = Date.now();
   const withinYears = (years: number) => rows.filter(row => {
     const age = now - new Date(row.date).getTime();
-    return age >= 0 && age <= years * 365.25 * 24 * 60 * 60 * 1000;
+    return age >= 0 && age <= years * 365.25 * DAY_MS;
   });
-  let pool = withinYears(7);
-  if (pool.length < 3) pool = withinYears(12);
+
+  let pool = withinYears(4);
+  let windowYears = 4;
+  if (pool.length < 3) { pool = withinYears(7); windowYears = 7; }
+  if (pool.length < 3) { pool = withinYears(12); windowYears = 12; }
+
   const sameType = pool.filter(row => row.propertyType === targetType);
   const useSameType = targetType !== "other" && sameType.length >= 3;
-  const chosen = useSameType ? sameType : pool;
-  return { chosen: chosen.slice(0, 30), sameTypeCount: sameType.length, useSameType };
+  const chosen = (useSameType ? sameType : pool).slice(0, 30);
+  return { chosen, sameTypeCount: sameType.length, useSameType, windowYears };
 }
 
-function comparableMedian(rows: Comparable[], targetType: string, useSameType: boolean) {
-  const targetFactor = typeFactor(targetType);
-  const normalized = rows.map(row => {
-    if (useSameType) return row.price;
-    return row.price * (targetFactor / typeFactor(row.propertyType));
-  }).filter(value => Number.isFinite(value) && value > 0);
-  return median(normalized);
+function recencyWeight(date: string) {
+  const ageDays = Math.max(0, (Date.now() - new Date(date).getTime()) / DAY_MS);
+  const halfLifeDays = 548;
+  return Math.max(0.05, Math.pow(0.5, ageDays / halfLifeDays));
+}
+
+function normalizedComparablePrice(row: Comparable, targetType: string, useSameType: boolean) {
+  if (useSameType) return row.price;
+  return row.price * (typeFactor(targetType) / typeFactor(row.propertyType));
+}
+
+function recencyWeightedBenchmark(rows: Comparable[], targetType: string, useSameType: boolean) {
+  if (!rows.length) return null;
+  const points = rows.map(row => ({
+    value: normalizedComparablePrice(row, targetType, useSameType),
+    weight: recencyWeight(row.date),
+  })).filter(point => Number.isFinite(point.value) && point.value > 0 && point.weight > 0)
+    .sort((a, b) => a.value - b.value);
+
+  if (!points.length) return null;
+  const totalWeight = points.reduce((sum, point) => sum + point.weight, 0);
+  let cumulative = 0;
+  for (const point of points) {
+    cumulative += point.weight;
+    if (cumulative >= totalWeight / 2) return point.value;
+  }
+  return points[points.length - 1].value;
 }
 
 Deno.serve(async req => {
@@ -247,7 +260,7 @@ Deno.serve(async req => {
 
   const { data: property, error: propertyError } = await supabase
     .from("properties")
-    .select("id,address,price,bedrooms,property_type,floor_area_m2,listing_data,metrics,value_enriched_at")
+    .select("id,address,postcode,price,bedrooms,property_type,floor_area_m2,listing_data,metrics,value_enriched_at")
     .eq("id", propertyId)
     .single();
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
@@ -301,9 +314,9 @@ Deno.serve(async req => {
     }
 
     const evidence = selectEvidence(allComparables, targetType);
-    const rawMedian = comparableMedian(evidence.chosen, targetType, evidence.useSameType);
+    const benchmark = recencyWeightedBenchmark(evidence.chosen, targetType, evidence.useSameType);
     const adjustment = shapeAdjustment(targetType, property.floor_area_m2, property.bedrooms);
-    const expectedPrice = rawMedian === null ? null : Math.round(rawMedian * adjustment);
+    const expectedPrice = benchmark === null ? null : Math.round(benchmark * adjustment);
     const ratio = expectedPrice && expectedPrice > 0 ? price / expectedPrice : null;
     const market = ratio === null ? NEUTRAL_MARKET : interpolateScore(ratio);
     const score = clamp(Math.round(market * 0.80 + budget.score * 0.20));
@@ -318,6 +331,7 @@ Deno.serve(async req => {
     else if (count >= 8) confidence += 55;
     if (evidence.useSameType) confidence += 10;
     if (budget.known) confidence += 10;
+    if (count >= 3 && evidence.windowYears <= 4) confidence += 5;
     confidence = clamp(confidence);
 
     const status = expectedPrice !== null && confidence >= 75 ? "matched" : "partial";
@@ -329,6 +343,7 @@ Deno.serve(async req => {
       date: row.date.slice(0, 10),
       propertyType: row.propertyType,
       address: [row.paon, row.saon, row.street].filter(Boolean).join(" "),
+      recencyWeight: Math.round(recencyWeight(row.date) * 1000) / 1000,
     }));
     const metrics = { ...(property.metrics || {}), value: score };
 
@@ -339,7 +354,7 @@ Deno.serve(async req => {
       value_budget_score: budget.score,
       value_data_confidence: confidence,
       value_comparable_count: count,
-      value_median_price: rawMedian === null ? null : Math.round(rawMedian),
+      value_median_price: benchmark === null ? null : Math.round(benchmark),
       value_expected_price: expectedPrice,
       value_price_vs_expected_pct: ratio === null ? null : Math.round((ratio - 1) * 10000) / 100,
       value_price_per_m2: pricePerM2,
@@ -366,10 +381,13 @@ Deno.serve(async req => {
       postcode,
       comparableCount: count,
       sameTypeCount: evidence.sameTypeCount,
+      windowYears: evidence.windowYears,
+      benchmark,
       expectedPrice,
       ratio,
       confidence,
       sourceError,
+      method: "recency-weighted median with ~18 month half-life",
     });
 
     return json({
@@ -381,7 +399,7 @@ Deno.serve(async req => {
       confidence,
       postcode,
       comparableCount: count,
-      medianPrice: rawMedian,
+      benchmark,
       expectedPrice,
       priceVsExpectedPct: ratio === null ? null : Math.round((ratio - 1) * 10000) / 100,
       pricePerM2,
