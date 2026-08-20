@@ -216,7 +216,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: property, error: propertyError } = await supabase
     .from("properties")
-    .select("id,address,postcode,metrics,flood_status,flood_enriched_at")
+    .select("id,address,postcode,flood_status,flood_enriched_at")
     .eq("id", propertyId)
     .single();
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
@@ -265,7 +265,7 @@ Deno.serve(async (req: Request) => {
     if (!isFullPostcode(postcode)) {
       const { data: updated } = await supabase
         .from("properties")
-        .update({ flood_status: "not_found", flood_enriched_at: now, updated_at: now })
+        .update({ flood_status: "not_found", environment_status: "pending", flood_enriched_at: now, updated_at: now })
         .eq("id", propertyId)
         .select("*")
         .single();
@@ -289,6 +289,7 @@ Deno.serve(async (req: Request) => {
           flood_groundwater_risk: null,
           flood_data_date: dataset.dataDate,
           flood_enriched_at: now,
+          environment_status: "pending",
           updated_at: now,
         })
         .eq("id", propertyId)
@@ -301,7 +302,6 @@ Deno.serve(async (req: Request) => {
     const band = headlineBand(row.highCount, row.mediumCount, row.lowCount);
     const score = scoreFlood(band, row.groundwaterRisk);
     const collapsedRisk = band === "very_low" ? "low" : band;
-    const metrics = { ...(property.metrics ?? {}), environment: score };
 
     const { data: updatedProperty, error: updateError } = await supabase
       .from("properties")
@@ -316,7 +316,7 @@ Deno.serve(async (req: Request) => {
         flood_data_date: dataset.dataDate,
         flood_enriched_at: now,
         flood_risk: collapsedRisk,
-        metrics,
+        environment_status: "pending",
         updated_at: now,
       })
       .eq("id", propertyId)
@@ -353,7 +353,7 @@ Deno.serve(async (req: Request) => {
     const { error: areaError } = await supabase
       .from("area_metrics")
       .upsert(
-        { property_id: propertyId, environment_score: score, raw_data: rawData, refreshed_at: now },
+        { property_id: propertyId, raw_data: rawData, refreshed_at: now },
         { onConflict: "property_id" },
       );
     if (areaError) throw areaError;
