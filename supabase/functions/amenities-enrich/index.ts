@@ -1,12 +1,15 @@
 import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 
 const OVERPASS_ENDPOINTS = [
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
 ];
+const OVERPASS_BUDGET_MS = 26_000;
+const ENDPOINT_BUDGETS_MS = [9_000, 12_000, 8_000];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.0";
+const VERSION = "1.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -56,7 +59,8 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.0" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.2" },
+    signal: AbortSignal.timeout(6000),
   });
   const text = await response.text();
   let data: any = null;
@@ -152,7 +156,7 @@ function classify(tags: Record<string, string>) {
 }
 
 async function loadPois(latitude: number, longitude: number) {
-  const query = `[out:json][timeout:20];(
+  const query = `[out:json][timeout:10];(
     nwr(around:7000,${latitude},${longitude})[shop~"^(supermarket|convenience|grocery|greengrocer|bakery|butcher|clothes|shoes|chemist|hardware|variety_store|department_store|books|stationery|electronics|mobile_phone|optician|hairdresser|beauty|laundry|dry_cleaning)$"];
     nwr(around:7000,${latitude},${longitude})[amenity~"^(doctors|pharmacy|cafe|restaurant|fast_food|pub|post_office|bank|library|marketplace)$"];
     nwr(around:7000,${latitude},${longitude})[healthcare~"^(doctor|general_practitioner|clinic|pharmacy)$"];
@@ -160,17 +164,24 @@ async function loadPois(latitude: number, longitude: number) {
   );out center tags;`;
 
   const failures: string[] = [];
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  const deadline = Date.now() + OVERPASS_BUDGET_MS;
+
+  for (let index = 0; index < OVERPASS_ENDPOINTS.length; index++) {
+    const endpoint = OVERPASS_ENDPOINTS[index];
+    const remaining = deadline - Date.now();
+    if (remaining < 1200) break;
+    const timeoutMs = Math.max(1000, Math.min(ENDPOINT_BUDGETS_MS[index] || 8000, remaining - 200));
+
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "House-Ranker/2.0 amenities-v1",
+          "User-Agent": "House-Ranker/2.2 amenities-v1.1",
         },
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(28000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await response.text();
       let payload: any = null;
@@ -207,7 +218,8 @@ async function loadPois(latitude: number, longitude: number) {
       failures.push(`${new URL(endpoint).hostname}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(`OpenStreetMap amenity lookup failed: ${failures.join(" | ")}`);
+
+  throw new Error(`OpenStreetMap amenity lookup failed within ${Math.round(OVERPASS_BUDGET_MS / 1000)}s budget: ${failures.join(" | ")}`);
 }
 
 function groupPois(pois: Poi[], group: string) {
@@ -331,7 +343,7 @@ Deno.serve(async req => {
 
   const { data: property, error: propertyError } = await supabase
     .from("properties")
-    .select("id,address,postcode,latitude,longitude,metrics")
+    .select("id,address,postcode,latitude,longitude,metrics,amenities_status,amenities_score,amenities_enriched_at")
     .eq("id", propertyId)
     .single();
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
@@ -437,7 +449,7 @@ Deno.serve(async req => {
         counts: result.counts,
         nearest: result.nearest,
         formula: result.formula,
-        limitations: "V1 measures straight-line access and mapped choice. It does not yet account for opening hours, store size, footpath routing, service quality or live availability.",
+        limitations: "V1.1 measures straight-line access and mapped choice. It does not yet account for opening hours, store size, footpath routing, service quality or live availability.",
         endpointFailures: loaded.failures,
       },
     };
@@ -456,6 +468,7 @@ Deno.serve(async req => {
       score: result.score,
       components: result.components,
       counts: result.counts,
+      endpoint: loaded.endpoint,
     });
 
     return json({
@@ -470,6 +483,25 @@ Deno.serve(async req => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const now = new Date().toISOString();
+    const previousScore = numberOrNull(property.amenities_score);
+
+    if (previousScore !== null) {
+      const { data: updated } = await supabase.from("properties").update({
+        amenities_status: "partial",
+        updated_at: now,
+      }).eq("id", propertyId).select("*").single();
+      await finishRun("failed", { outcome: "retained_previous", version: VERSION, retainedScore: previousScore }, message);
+      return json({
+        status: "partial",
+        version: VERSION,
+        score: previousScore,
+        retained: true,
+        transientError: true,
+        detail: message,
+        property: updated,
+      });
+    }
+
     await supabase.from("properties").update({
       amenities_status: "error",
       amenities_enriched_at: now,
