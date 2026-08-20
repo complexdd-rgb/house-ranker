@@ -1,6 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 
-const VERSION = "1.0";
+const VERSION = "1.1";
 const RUN_GUARD_MS = 60 * 1000;
 const NEUTRAL_UNKNOWN = 60;
 
@@ -87,23 +87,58 @@ function typeScore(value: unknown) {
   return { score: 65, known: true, label: type };
 }
 
-function bedroomScore(value: unknown) {
-  const bedrooms = num(value);
-  if (bedrooms === null) return { score: NEUTRAL_UNKNOWN, known: false };
-  if (bedrooms <= 0) return { score: 20, known: true };
-  if (bedrooms === 1) return { score: 35, known: true };
-  if (bedrooms === 2) return { score: 55, known: true };
-  if (bedrooms === 3) return { score: 80, known: true };
-  if (bedrooms === 4) return { score: 95, known: true };
-  return { score: 100, known: true };
+function bedroomCountBaseScore(bedrooms: number) {
+  if (bedrooms <= 0) return 20;
+  if (bedrooms === 1) return 35;
+  if (bedrooms === 2) return 55;
+  if (bedrooms === 3) return 80;
+  if (bedrooms === 4) return 95;
+  return 100;
 }
 
-function bathroomScore(value: unknown) {
+function bedroomScore(value: unknown, areaInput: unknown) {
+  const bedrooms = num(value);
+  if (bedrooms === null) return { score: NEUTRAL_UNKNOWN, known: false };
+
+  const base = bedroomCountBaseScore(bedrooms);
+  const area = num(areaInput);
+  if (area === null || area <= 0 || bedrooms <= 0) {
+    return { score: base, known: true };
+  }
+
+  const perBedroom = area / bedrooms;
+  const fit = perBedroomSpaceScore(perBedroom);
+  return {
+    score: clamp(Math.round(0.55 * base + 0.45 * fit)),
+    known: true,
+  };
+}
+
+function bathroomScore(value: unknown, bedroomsInput: unknown) {
   const bathrooms = num(value);
+  const bedrooms = num(bedroomsInput);
   if (bathrooms === null) return { score: NEUTRAL_UNKNOWN, known: false };
   if (bathrooms <= 0) return { score: 25, known: true };
-  if (bathrooms === 1) return { score: 60, known: true };
-  if (bathrooms === 2) return { score: 90, known: true };
+
+  if (bedrooms === null || bedrooms <= 0) {
+    if (bathrooms === 1) return { score: 60, known: true };
+    if (bathrooms === 2) return { score: 90, known: true };
+    return { score: 100, known: true };
+  }
+
+  if (bathrooms === 1) {
+    if (bedrooms <= 2) return { score: 80, known: true };
+    if (bedrooms === 3) return { score: 70, known: true };
+    if (bedrooms === 4) return { score: 55, known: true };
+    return { score: 45, known: true };
+  }
+
+  if (bathrooms === 2) {
+    if (bedrooms <= 4) return { score: 100, known: true };
+    if (bedrooms === 5) return { score: 90, known: true };
+    return { score: 82, known: true };
+  }
+
   return { score: 100, known: true };
 }
 
@@ -117,8 +152,8 @@ function scoreProperty(row: any) {
   const weights = { space: 40, type: 20, bedrooms: 15, bathrooms: 10, parking: 8, garden: 7 };
   const space = spaceScore(row.floor_area_m2, row.bedrooms);
   const type = typeScore(row.property_type);
-  const bedrooms = bedroomScore(row.bedrooms);
-  const bathrooms = bathroomScore(row.bathrooms);
+  const bedrooms = bedroomScore(row.bedrooms, row.floor_area_m2);
+  const bathrooms = bathroomScore(row.bathrooms, row.bedrooms);
   const parking = binaryFeatureScore(row.parking, 40);
   const garden = binaryFeatureScore(row.garden, 35);
 
@@ -169,7 +204,7 @@ function scoreProperty(row: any) {
     missing,
     weights,
     neutralUnknown: NEUTRAL_UNKNOWN,
-    formula: "40% space/layout + 20% property type + 15% bedrooms + 10% bathrooms + 8% parking + 7% garden.",
+    formula: "40% space/layout + 20% property type + 15% bedroom count adjusted for floor-area fit + 10% bathroom adequacy for the bedroom count + 8% parking + 7% garden.",
   };
 }
 

@@ -1,13 +1,15 @@
 import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 
 const OVERPASS_ENDPOINTS = [
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
+const OVERPASS_BUDGET_MS = 18_000;
+const ENDPOINT_BUDGETS_MS = [6_500, 8_500, 6_500];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.2";
+const VERSION = "1.3";
 const FALLBACK_FLOOD_SCORE = 60;
 
 const corsHeaders = {
@@ -58,7 +60,8 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.1" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.2" },
+    signal: AbortSignal.timeout(6000),
   });
   const text = await response.text();
   let data: any = null;
@@ -177,17 +180,24 @@ function parseFeatures(elements: any[], latitude: number, longitude: number) {
 
 async function runOverpass(query: string, label: string) {
   const failures: string[] = [];
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  const deadline = Date.now() + OVERPASS_BUDGET_MS;
+
+  for (let index = 0; index < OVERPASS_ENDPOINTS.length; index++) {
+    const endpoint = OVERPASS_ENDPOINTS[index];
+    const remaining = deadline - Date.now();
+    if (remaining < 1200) break;
+    const timeoutMs = Math.max(1000, Math.min(ENDPOINT_BUDGETS_MS[index] || 6000, remaining - 200));
+
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "House-Ranker/2.1 environment-v1",
+          "User-Agent": "House-Ranker/2.2 environment-v1.3",
         },
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(14000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await response.text();
       let payload: any = null;
@@ -200,11 +210,12 @@ async function runOverpass(query: string, label: string) {
       failures.push(`${new URL(endpoint).hostname}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(`${label} query failed: ${failures.join(" | ")}`);
+
+  throw new Error(`${label} query failed within ${Math.round(OVERPASS_BUDGET_MS / 1000)}s budget: ${failures.join(" | ")}`);
 }
 
 async function loadEnvironmentFeatures(latitude: number, longitude: number) {
-  const placesQuery = `[out:json][timeout:12];(
+  const placesQuery = `[out:json][timeout:8];(
     nwr(around:3500,${latitude},${longitude})[leisure~"^(park|nature_reserve)$"];
     nwr(around:3500,${latitude},${longitude})[landuse~"^(recreation_ground|forest|industrial|quarry|landfill)$"];
     nwr(around:3500,${latitude},${longitude})[natural~"^(wood|heath|grassland)$"];
@@ -213,7 +224,7 @@ async function loadEnvironmentFeatures(latitude: number, longitude: number) {
     nwr(around:3500,${latitude},${longitude})[man_made~"^(wastewater_plant|works)$"];
   );out center tags;`;
 
-  const roadsQuery = `[out:json][timeout:12];
+  const roadsQuery = `[out:json][timeout:8];
     way(around:1800,${latitude},${longitude})[highway~"^(motorway|trunk|primary|secondary)$"];
     out geom tags;`;
 
@@ -345,7 +356,7 @@ Deno.serve(async req => {
 
   const { data: property, error: propertyError } = await supabase
     .from("properties")
-    .select("id,address,postcode,latitude,longitude,metrics,flood_status,flood_score,flood_band")
+    .select("id,address,postcode,latitude,longitude,metrics,flood_status,flood_score,flood_band,environment_status,environment_score,environment_enriched_at")
     .eq("id", propertyId)
     .single();
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
@@ -452,7 +463,7 @@ Deno.serve(async req => {
         diagnosticCounts: result.diagnosticCounts,
         nearest: result.nearest,
         formula: result.formula,
-        limitations: "V1 uses the existing Environment Agency postcode flood score plus straight-line OpenStreetMap proximity. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Raw OSM feature counts are diagnostic only because one real place or road can contain many mapped features; they are not used in scoring. OSM coverage can be incomplete.",
+        limitations: "V1.3 uses the existing Environment Agency postcode flood score plus straight-line OpenStreetMap proximity. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Raw OSM feature counts are diagnostic only. OSM coverage can be incomplete.",
         endpointFailures: loaded.failures,
       },
     };
@@ -488,6 +499,25 @@ Deno.serve(async req => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const now = new Date().toISOString();
+    const previousScore = numberOrNull(property.environment_score);
+
+    if (previousScore !== null) {
+      const { data: updated } = await supabase.from("properties").update({
+        environment_status: "partial",
+        updated_at: now,
+      }).eq("id", propertyId).select("*").single();
+      await finishRun("failed", { outcome: "retained_previous", version: VERSION, retainedScore: previousScore }, message);
+      return json({
+        status: "partial",
+        version: VERSION,
+        score: previousScore,
+        retained: true,
+        transientError: true,
+        detail: message,
+        property: updated,
+      });
+    }
+
     await supabase.from("properties").update({
       environment_status: "error",
       environment_enriched_at: now,
