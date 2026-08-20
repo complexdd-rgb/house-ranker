@@ -14,6 +14,7 @@
 
   const num = value => value === null || value === undefined || value === '' ? null : (Number.isFinite(Number(value)) ? Number(value) : null);
   const bandScore = band => ({ A:95, B:85, C:72, D:60, E:47, F:32, G:15 })[String(band || '').toUpperCase()] ?? null;
+  const hasPremise = value => /^\s*(?:flat\s+[a-z0-9-]+\s+)?\d+[a-z]?\b/i.test(String(value || '').trim());
 
   function status(message, tone = '') {
     const el = document.getElementById('listingImportStatus');
@@ -107,7 +108,19 @@
     if (listing.councilTaxBand) bits.push(`council tax ${listing.councilTaxBand}`);
     if (listing.floorAreaM2) bits.push(`${Math.round(Number(listing.floorAreaM2))} m²`);
     const needsReview = resolution.status === 'ambiguous' || resolution.status === 'unresolved' || resolution.status === 'error' || resolution.refinement?.status === 'needs_review';
+    if (needsReview && listing.postcode) bits.push('you can enter the house number manually');
     status(`Imported${bits.length ? ` · ${bits.join(' · ')}` : ''}`, needsReview ? 'warning' : 'success');
+  }
+
+  function noteManualAddress() {
+    const url = document.getElementById('listingUrl')?.value?.trim() || '';
+    const listing = imports.get(canon(url));
+    if (!listing) return;
+    const current = document.getElementById('address')?.value?.trim() || '';
+    const imported = String(listing.resolvedAddress || listing.address || '').trim();
+    if (current && current !== imported && hasPremise(current)) {
+      status('Manual house number entered · this address will be used when you save and verified against official data.', 'success');
+    }
   }
 
   async function importListing({ quiet = false } = {}) {
@@ -159,6 +172,26 @@
       const row = base(property, userId);
       const listing = imports.get(canon(property.listingUrl));
       if (!listing) return row;
+
+      const manualAddress = String(property.address || '').trim();
+      const importedAddress = String(listing.resolvedAddress || listing.address || '').trim();
+      if (manualAddress && manualAddress !== importedAddress && hasPremise(manualAddress)) {
+        const automaticStatus = listing.addressResolution?.status || null;
+        listing.manualAddress = manualAddress;
+        listing.address = manualAddress;
+        listing.resolvedAddress = manualAddress;
+        listing.addressResolution = {
+          ...(listing.addressResolution || {}),
+          status: 'manual',
+          method: 'manual_override',
+          address: manualAddress,
+          postcode: listing.postcode || row.postcode || null,
+          manuallyEntered: true,
+          automaticStatus,
+          confidence: null
+        };
+      }
+
       Object.assign(row, {
         listing_source: listing.source || 'rightmove',
         listing_id: listing.listingId || null,
@@ -198,6 +231,7 @@
     document.getElementById('listingImportButton').addEventListener('click', () => importListing());
     input.addEventListener('paste', () => setTimeout(() => importListing({ quiet:true }), 40));
     input.addEventListener('change', () => importListing({ quiet:true }));
+    document.getElementById('address')?.addEventListener('input', noteManualAddress);
     const heading = document.querySelector('#add .page-heading .muted');
     if (heading) heading.textContent = 'Paste a Rightmove URL. House Ranker will pull the advert, resolve its full postcode and exact address where possible, then enrich it with official data.';
   }
