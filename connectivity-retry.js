@@ -106,6 +106,8 @@
     ['Price & value', 'value-enrich']
   ];
 
+  const refreshRetryDelays = [650, 1600];
+
   function refreshButton() {
     return document.getElementById('refreshAllData');
   }
@@ -116,6 +118,32 @@
     button.textContent = text;
     button.disabled = disabled;
     button.setAttribute('aria-busy', disabled ? 'true' : 'false');
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function invokeRefreshSource(functionName, propertyId) {
+    let lastResult = null;
+
+    for (let attempt = 0; attempt <= refreshRetryDelays.length; attempt++) {
+      try {
+        const result = await cloud.client.functions.invoke(functionName, {
+          body: { propertyId }
+        });
+        lastResult = result;
+
+        const failed = Boolean(result?.error || result?.data?.error || result?.data?.transientError);
+        if (!failed) return { ok: true, result, attempts: attempt + 1 };
+      } catch (error) {
+        lastResult = { error };
+      }
+
+      if (attempt < refreshRetryDelays.length) await sleep(refreshRetryDelays[attempt]);
+    }
+
+    return { ok: false, result: lastResult, attempts: refreshRetryDelays.length + 1 };
   }
 
   async function refreshAllData() {
@@ -142,16 +170,11 @@
         const property = properties[propertyIndex];
         for (const [label, functionName] of refreshSources) {
           setRefreshButton(`↻ ${propertyIndex + 1}/${properties.length} · ${label}`, true);
-          try {
-            const { data, error } = await cloud.client.functions.invoke(functionName, {
-              body: { propertyId: property.id }
-            });
-            if (error || data?.error) failures.push({ propertyId: property.id, label });
-          } catch {
-            failures.push({ propertyId: property.id, label });
-          }
+          const outcome = await invokeRefreshSource(functionName, property.id);
+          if (!outcome.ok) failures.push({ propertyId: property.id, label });
+
           completed += 1;
-          if (completed < total) await new Promise(resolve => setTimeout(resolve, 180));
+          if (completed < total) await sleep(180);
         }
       }
 
@@ -160,7 +183,7 @@
       else if (typeof renderDashboard === 'function') renderDashboard();
 
       if (failures.length) {
-        toast(`Refresh finished · ${total - failures.length}/${total} checks updated. ${failures.length} can be retried later.`);
+        toast(`Refresh finished · ${total - failures.length}/${total} checks updated. ${failures.length} retained their previous data or can be retried later.`);
       } else {
         toast('All house data refreshed');
       }
