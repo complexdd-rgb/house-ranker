@@ -2,11 +2,12 @@ import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.0";
+const VERSION = "1.1";
 const FALLBACK_FLOOD_SCORE = 60;
 
 const corsHeaders = {
@@ -57,7 +58,7 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.0" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.1" },
   });
   const text = await response.text();
   let data: any = null;
@@ -115,15 +116,6 @@ function elementPoint(element: any, originLat: number, originLon: number) {
   return { lat, lon, distanceMiles: haversineMiles(originLat, originLon, lat, lon) };
 }
 
-function normaliseName(value: unknown) {
-  return String(value ?? "")
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
 function classify(tags: Record<string, string>) {
   const groups: string[] = [];
   const leisure = tags.leisure || "";
@@ -156,21 +148,34 @@ function classify(tags: Record<string, string>) {
   return [...new Set(groups)];
 }
 
-async function loadEnvironmentFeatures(latitude: number, longitude: number) {
-  const query = `[out:json][timeout:22];
-  (
-    nwr(around:5000,${latitude},${longitude})[leisure~"^(park|nature_reserve)$"];
-    nwr(around:5000,${latitude},${longitude})[landuse~"^(recreation_ground|forest)$"];
-    nwr(around:5000,${latitude},${longitude})[natural~"^(wood|heath|grassland)$"];
-    nwr(around:5000,${latitude},${longitude})[boundary="protected_area"];
-    nwr(around:5000,${latitude},${longitude})[landuse~"^(industrial|quarry|landfill)$"];
-    nwr(around:5000,${latitude},${longitude})[amenity~"^(waste_disposal|waste_transfer_station)$"];
-    nwr(around:5000,${latitude},${longitude})[man_made~"^(wastewater_plant|works)$"];
-  )->.places;
-  way(around:2500,${latitude},${longitude})[highway~"^(motorway|trunk|primary|secondary)$"]->.roads;
-  .places out center tags;
-  .roads out geom tags;`;
+function parseFeatures(elements: any[], latitude: number, longitude: number) {
+  const map = new Map<string, Feature>();
+  for (const element of elements) {
+    const point = elementPoint(element, latitude, longitude);
+    if (!point) continue;
+    const tags = (element.tags || {}) as Record<string, string>;
+    const groups = classify(tags);
+    if (!groups.length) continue;
+    const distanceMiles = point.distanceMiles;
+    if (!Number.isFinite(distanceMiles) || distanceMiles > 4) continue;
+    const name = String(tags.name || tags.ref || tags.operator || tags.landuse || tags.highway || tags.natural || "Unnamed").trim();
+    const key = `${element.type}/${element.id}`;
+    const feature: Feature = {
+      id: key,
+      name,
+      latitude: point.lat,
+      longitude: point.lon,
+      distanceMiles: round2(distanceMiles),
+      tags,
+      groups,
+    };
+    const current = map.get(key);
+    if (!current || feature.distanceMiles < current.distanceMiles) map.set(key, feature);
+  }
+  return [...map.values()].sort((a, b) => a.distanceMiles - b.distanceMiles);
+}
 
+async function runOverpass(query: string, label: string) {
   const failures: string[] = [];
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
@@ -179,47 +184,55 @@ async function loadEnvironmentFeatures(latitude: number, longitude: number) {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "House-Ranker/2.0 environment-v1",
+          "User-Agent": "House-Ranker/2.1 environment-v1",
         },
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(14000),
       });
       const text = await response.text();
       let payload: any = null;
       try { payload = text ? JSON.parse(text) : null; } catch {}
       if (!response.ok || !Array.isArray(payload?.elements)) {
-        throw new Error(`${response.status}: ${text.slice(0, 180)}`);
+        throw new Error(`${response.status}: ${text.slice(0, 160)}`);
       }
-
-      const map = new Map<string, Feature>();
-      for (const element of payload.elements) {
-        const point = elementPoint(element, latitude, longitude);
-        if (!point) continue;
-        const tags = (element.tags || {}) as Record<string, string>;
-        const groups = classify(tags);
-        if (!groups.length) continue;
-        const distanceMiles = point.distanceMiles;
-        if (!Number.isFinite(distanceMiles) || distanceMiles > 5) continue;
-        const name = String(tags.name || tags.ref || tags.operator || tags.landuse || tags.highway || tags.natural || "Unnamed").trim();
-        const key = `${groups.sort().join("+")}|${normaliseName(name)}|${point.lat.toFixed(3)}|${point.lon.toFixed(3)}`;
-        const feature: Feature = {
-          id: `${element.type}/${element.id}`,
-          name,
-          latitude: point.lat,
-          longitude: point.lon,
-          distanceMiles: round2(distanceMiles),
-          tags,
-          groups,
-        };
-        const current = map.get(key);
-        if (!current || feature.distanceMiles < current.distanceMiles) map.set(key, feature);
-      }
-      return { features: [...map.values()].sort((a, b) => a.distanceMiles - b.distanceMiles), endpoint, failures };
+      return { elements: payload.elements, endpoint, failures };
     } catch (error) {
       failures.push(`${new URL(endpoint).hostname}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  throw new Error(`OpenStreetMap environment lookup failed: ${failures.join(" | ")}`);
+  throw new Error(`${label} query failed: ${failures.join(" | ")}`);
+}
+
+async function loadEnvironmentFeatures(latitude: number, longitude: number) {
+  const placesQuery = `[out:json][timeout:12];(
+    nwr(around:3500,${latitude},${longitude})[leisure~"^(park|nature_reserve)$"];
+    nwr(around:3500,${latitude},${longitude})[landuse~"^(recreation_ground|forest|industrial|quarry|landfill)$"];
+    nwr(around:3500,${latitude},${longitude})[natural~"^(wood|heath|grassland)$"];
+    nwr(around:3500,${latitude},${longitude})[boundary="protected_area"];
+    nwr(around:3500,${latitude},${longitude})[amenity~"^(waste_disposal|waste_transfer_station)$"];
+    nwr(around:3500,${latitude},${longitude})[man_made~"^(wastewater_plant|works)$"];
+  );out center tags;`;
+
+  const roadsQuery = `[out:json][timeout:12];
+    way(around:1800,${latitude},${longitude})[highway~"^(motorway|trunk|primary|secondary)$"];
+    out geom tags;`;
+
+  const [places, roads] = await Promise.all([
+    runOverpass(placesQuery, "places"),
+    runOverpass(roadsQuery, "roads"),
+  ]);
+
+  const features = parseFeatures(
+    [...places.elements, ...roads.elements],
+    latitude,
+    longitude,
+  );
+
+  return {
+    features,
+    endpoints: [...new Set([places.endpoint, roads.endpoint])],
+    failures: [...places.failures, ...roads.failures],
+  };
 }
 
 function groupFeatures(features: Feature[], group: string) {
@@ -298,11 +311,7 @@ function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
     status: floodAvailable ? "matched" : "partial",
     components: { flood: floodScore, green, road, landuse },
     floodAvailable,
-    nearest: {
-      green: nearestGreen,
-      road: nearestRoad,
-      industrial: nearestIndustrial,
-    },
+    nearest: { green: nearestGreen, road: nearestRoad, industrial: nearestIndustrial },
     counts: {
       green2Miles: greenCount2Miles,
       industrial1Mile: industrialCount1Mile,
@@ -438,7 +447,7 @@ Deno.serve(async req => {
         version: VERSION,
         status: result.status,
         source: "Environment Agency flood screening + OpenStreetMap via Overpass API",
-        endpoint: loaded.endpoint,
+        endpoints: loaded.endpoints,
         locationMethod: location.method,
         score: result.score,
         components: result.components,
@@ -467,6 +476,7 @@ Deno.serve(async req => {
       components: result.components,
       counts: result.counts,
       floodAvailable: result.floodAvailable,
+      endpoints: loaded.endpoints,
     });
 
     return json({
