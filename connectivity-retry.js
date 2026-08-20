@@ -74,20 +74,21 @@
     }
   }
 
-  function enhanceValueV11Detail() {
+  function enhanceValueV12Detail() {
     const detail = document.getElementById('propertyDetail');
     const card = detail?.querySelector('.value-detail-card');
     if (!card) return;
 
     const benchmarkLabel = card.querySelector('.value-confidence > div:nth-child(3) small');
-    if (benchmarkLabel) benchmarkLabel.textContent = 'Recency-weighted benchmark';
+    if (benchmarkLabel) benchmarkLabel.textContent = 'Adjusted local benchmark';
 
     const method = card.querySelector('.value-method');
     if (method) {
       const title = method.querySelector('strong');
-      if (title) title.textContent = 'How Price & Value V1.1 is scored';
+      if (title) title.textContent = 'How Price & Value V1.2 is scored';
       const paragraphs = method.querySelectorAll('p.muted');
-      if (paragraphs[0]) paragraphs[0].textContent = '80% compares the asking price with HM Land Registry sold-price evidence in the full postcode. Recent sales are weighted much more heavily (about an 18-month half-life), older evidence is only brought in when the local sample is thin, and same-type sales are preferred. A small floor-area and bedroom adjustment is then applied to the benchmark.';
+      if (paragraphs[0]) paragraphs[0].textContent = '80% compares the asking price with HM Land Registry sold-price evidence. V1.2 first prefers same-type sales on the same street and postcode, then widens to nearby postcodes before mixing property types. Suspicious one-off sales are filtered when the surrounding evidence strongly disagrees, EPC floor area is used to adjust comparable prices where available, and recent sales still carry more weight.';
+      if (paragraphs[1]) paragraphs[1].textContent = 'The remaining 20% is your saved budget score. When sold-price evidence is thin or mixed, the market score is pulled toward neutral rather than letting a weak comparable set dominate the House Score.';
     }
   }
 
@@ -96,8 +97,8 @@
     if (detailButton) {
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 700);
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 1800);
-      setTimeout(() => enhanceValueV11Detail(), 900);
-      setTimeout(() => enhanceValueV11Detail(), 1900);
+      setTimeout(() => enhanceValueV12Detail(), 900);
+      setTimeout(() => enhanceValueV12Detail(), 1900);
     }
 
     const retry = event.target.closest?.('[data-connectivity-retry]');
@@ -107,12 +108,12 @@
 
     const valueRetry = event.target.closest?.('[data-value-retry]');
     if (valueRetry) {
-      [3000, 8000, 15000].forEach(delay => setTimeout(() => enhanceValueV11Detail(), delay));
+      [3000, 8000, 15000].forEach(delay => setTimeout(() => enhanceValueV12Detail(), delay));
     }
   });
 
   setTimeout(() => retryLegacyConnectivitySetup(), 12000);
   setTimeout(() => retryLegacyConnectivitySetup(), 42000);
 
-  window.houseRankerConnectivityRetry = { retryLegacyConnectivitySetup, enhanceConnectivityV2Detail, enhanceValueV11Detail };
+  window.houseRankerConnectivityRetry = { retryLegacyConnectivitySetup, enhanceConnectivityV2Detail, enhanceValueV12Detail };
 })();
