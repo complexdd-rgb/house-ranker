@@ -271,9 +271,13 @@
     if (!cloud.session || !cloud.client) return;
     await hydrateEnvironmentMetadata();
     const candidate = state.properties.find(property => {
-      if (property.demo || attempted.has(property.id)) return false;
+      if (property.demo) return false;
       const status = property.environmentInfo?.status || 'pending';
+      // A fresh Flood result deliberately marks Environment pending. Allow that
+      // dependency change to trigger a recompute even if Environment already ran
+      // earlier in this browser session.
       if (status === 'pending') return true;
+      if (attempted.has(property.id)) return false;
       if (status === 'needs_location' && (property.postcode || (property.latitude !== null && property.longitude !== null))) return true;
       if (needsFloodRefresh(property)) return true;
       if (['matched', 'partial'].includes(status) && isStale(property)) return true;
