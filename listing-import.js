@@ -29,6 +29,42 @@
     el.dispatchEvent(new Event('change', { bubbles:true }));
   }
 
+  async function resolveListingAddress(listing) {
+    if (!listing || !cloud?.client || !cloud?.session) return listing;
+    status('Resolving the full address & postcode…', 'working');
+    try {
+      const { data, error } = await cloud.client.functions.invoke('address-resolve', { body: { listing } });
+      if (error || !data?.resolution) {
+        let detail = error?.message || 'Address resolver did not return a match';
+        try { detail = (await error?.context?.clone?.().json())?.error || detail; } catch {}
+        listing.addressResolution = { status: 'error', detail };
+        return listing;
+      }
+
+      const resolution = data.resolution;
+      listing.addressResolution = resolution;
+      listing.advertisedAddress = resolution.advertisedAddress || listing.address || null;
+
+      if (resolution.postcode) listing.postcode = resolution.postcode;
+      if (resolution.status === 'exact' && resolution.address) {
+        listing.address = resolution.address;
+        listing.resolvedAddress = resolution.address;
+        listing.resolvedUprn = resolution.uprn || null;
+        if (resolution.propertyType) listing.propertyType = resolution.propertyType;
+        if (!listing.floorAreaM2 && resolution.floorAreaM2) listing.floorAreaM2 = resolution.floorAreaM2;
+        if (!listing.advertisedEpcBand && resolution.epcBand) listing.advertisedEpcBand = resolution.epcBand;
+        if (!listing.advertisedEpcRating && resolution.epcRating !== null && resolution.epcRating !== undefined) listing.advertisedEpcRating = resolution.epcRating;
+      }
+      return listing;
+    } catch (error) {
+      listing.addressResolution = {
+        status: 'error',
+        detail: error instanceof Error ? error.message : String(error)
+      };
+      return listing;
+    }
+  }
+
   function populate(listing) {
     setValue('address', listing.address);
     setValue('postcode', listing.postcode);
@@ -48,12 +84,18 @@
     if (energy !== null) setValue('metric-energy', Math.round(energy));
 
     const bits = [];
+    const resolution = listing.addressResolution || {};
+    if (resolution.status === 'exact') bits.push(`exact address ${Math.round(Number(resolution.confidence) || 0)}%`);
+    else if (resolution.status === 'postcode_only') bits.push('full postcode matched');
+    else if (resolution.status === 'ambiguous') bits.push('house number needs review');
+    else if (resolution.status === 'unresolved') bits.push('address not resolved');
     if (listing.postcode) bits.push(listing.postcode);
     if (listing.bathrooms !== null && listing.bathrooms !== undefined) bits.push(`${listing.bathrooms} bathrooms`);
     if (listing.tenure) bits.push(String(listing.tenure).toLowerCase());
     if (listing.councilTaxBand) bits.push(`council tax ${listing.councilTaxBand}`);
     if (listing.floorAreaM2) bits.push(`${Math.round(Number(listing.floorAreaM2))} m²`);
-    status(`Imported${bits.length ? ` · ${bits.join(' · ')}` : ''}`, 'success');
+    const tone = resolution.status === 'ambiguous' || resolution.status === 'unresolved' || resolution.status === 'error' ? 'warning' : 'success';
+    status(`Imported${bits.length ? ` · ${bits.join(' · ')}` : ''}`, tone);
   }
 
   async function importListing({ quiet = false } = {}) {
@@ -81,12 +123,17 @@
         return null;
       }
 
-      const listing = data.listing;
+      let listing = data.listing;
+      listing = await resolveListingAddress(listing);
       imports.set(canon(url), listing);
       if (listing.url) imports.set(canon(listing.url), listing);
       if (input && listing.url) input.value = listing.url;
       populate(listing);
-      if (!quiet) toast('Rightmove details imported');
+      if (!quiet) {
+        if (listing.addressResolution?.status === 'exact') toast('Rightmove listing imported with exact address');
+        else if (listing.postcode) toast('Rightmove listing imported with full postcode');
+        else toast('Rightmove details imported');
+      }
       return listing;
     } finally {
       busy = false;
@@ -114,6 +161,7 @@
       });
       if (listing.floorAreaM2) row.floor_area_m2 = num(listing.floorAreaM2);
       if (listing.postcode) row.postcode = listing.postcode;
+      if (listing.addressResolution?.status === 'exact' && listing.resolvedUprn) row.epc_uprn = listing.resolvedUprn;
       return row;
     };
   }
@@ -133,13 +181,13 @@
     input.placeholder = 'Paste a Rightmove property URL';
     const controls = document.createElement('div');
     controls.id = 'listingImportControls';
-    controls.innerHTML = '<button id="listingImportButton" class="ghost" type="button">Import listing</button><span id="listingImportStatus">Paste a Rightmove link and the advert details will fill automatically.</span>';
+    controls.innerHTML = '<button id="listingImportButton" class="ghost" type="button">Import listing</button><span id="listingImportStatus">Paste a Rightmove link and House Ranker will resolve the full postcode and exact address where the evidence is strong enough.</span>';
     input.insertAdjacentElement('afterend', controls);
     document.getElementById('listingImportButton').addEventListener('click', () => importListing());
     input.addEventListener('paste', () => setTimeout(() => importListing({ quiet:true }), 40));
     input.addEventListener('change', () => importListing({ quiet:true }));
     const heading = document.querySelector('#add .page-heading .muted');
-    if (heading) heading.textContent = 'Paste a Rightmove URL. House Ranker will pull the advert details and then enrich it with official data.';
+    if (heading) heading.textContent = 'Paste a Rightmove URL. House Ranker will pull the advert, resolve its full postcode and exact address where possible, then enrich it with official data.';
   }
 
   const style = document.createElement('style');
