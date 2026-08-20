@@ -23,6 +23,56 @@
     return Number.isFinite(n) ? `${Math.round(n)}%` : '—';
   }
 
+  function cleanDisplayAddress(value) {
+    const parts = String(value || '').split(',').map(part => part.trim()).filter(Boolean);
+    if (parts.length < 2) return String(value || '').trim();
+
+    for (let index = 1; index < parts.length; index++) {
+      const fullPostcode = parts[index].toUpperCase().replace(/\s+/g, ' ').trim();
+      if (!/^[A-Z]{1,2}\d[A-Z\d]?\s+\d[A-Z]{2}$/.test(fullPostcode)) continue;
+      const outward = fullPostcode.split(' ')[0];
+      if (parts[index - 1].toUpperCase() === outward) {
+        parts.splice(index - 1, 1);
+      }
+      break;
+    }
+
+    return parts.join(', ');
+  }
+
+  function applyUiPolish() {
+    document.querySelectorAll('.property-title strong').forEach(title => {
+      const cleaned = cleanDisplayAddress(title.textContent);
+      if (cleaned && cleaned !== title.textContent) title.textContent = cleaned;
+    });
+
+    const detailTitle = document.querySelector('#propertyDetail .detail-head h2');
+    if (detailTitle) {
+      const cleaned = cleanDisplayAddress(detailTitle.textContent);
+      if (cleaned && cleaned !== detailTitle.textContent) detailTitle.textContent = cleaned;
+    }
+  }
+
+  function setupUiPolish() {
+    if (!document.getElementById('houseRankerUiPolishStyle')) {
+      const style = document.createElement('style');
+      style.id = 'houseRankerUiPolishStyle';
+      style.textContent = `
+        .property-row .details-btn{grid-column:2;justify-self:start;white-space:nowrap;width:max-content}
+        @media (max-width:680px){.property-row .details-btn{grid-column:2 / -1}}
+      `;
+      document.head.appendChild(style);
+    }
+
+    applyUiPolish();
+    ['leaderboard', 'propertyDetail'].forEach(id => {
+      const root = document.getElementById(id);
+      if (!root || root.dataset.uiPolishObserved === '1') return;
+      root.dataset.uiPolishObserved = '1';
+      new MutationObserver(() => applyUiPolish()).observe(root, { childList: true, subtree: true });
+    });
+  }
+
   function enhanceConnectivityV2Detail(propertyId) {
     const property = state.properties.find(item => item.id === propertyId);
     const connectivity = property?.connectivity;
@@ -181,6 +231,7 @@
       setRefreshButton('↻ Updating leaderboard…', true);
       if (typeof hydrateFromCloud === 'function') await hydrateFromCloud();
       else if (typeof renderDashboard === 'function') renderDashboard();
+      applyUiPolish();
 
       if (failures.length) {
         toast(`Refresh finished · ${total - failures.length}/${total} checks updated. ${failures.length} retained their previous data or can be retried later.`);
@@ -228,6 +279,7 @@
   document.addEventListener('click', event => {
     const detailButton = event.target.closest?.('[data-detail]');
     if (detailButton) {
+      setTimeout(() => applyUiPolish(), 50);
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 700);
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 1800);
       setTimeout(() => enhanceValueV12Detail(), 900);
@@ -246,7 +298,9 @@
   });
 
   setupRefreshAllButton();
+  setupUiPolish();
   setTimeout(() => setupRefreshAllButton(), 1200);
+  setTimeout(() => setupUiPolish(), 1200);
   setTimeout(() => retryLegacyConnectivitySetup(), 12000);
   setTimeout(() => retryLegacyConnectivitySetup(), 42000);
 
@@ -254,6 +308,7 @@
     retryLegacyConnectivitySetup,
     enhanceConnectivityV2Detail,
     enhanceValueV12Detail,
+    applyUiPolish,
     refreshAllData
   };
 })();

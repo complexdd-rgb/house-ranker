@@ -3,13 +3,13 @@ import { createClient } from "npm:@supabase/supabase-js@2.111.0";
 const OVERPASS_ENDPOINTS = [
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
 ];
-const OVERPASS_BUDGET_MS = 18_000;
-const ENDPOINT_BUDGETS_MS = [6_500, 8_500, 6_500];
+const OVERPASS_BUDGET_MS = 16_500;
+const ENDPOINT_BUDGETS_MS = [7_000, 5_500, 4_500];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.3";
+const VERSION = "1.4";
 const FALLBACK_FLOOD_SCORE = 60;
 
 const corsHeaders = {
@@ -60,7 +60,7 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.2" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.3" },
     signal: AbortSignal.timeout(6000),
   });
   const text = await response.text();
@@ -124,7 +124,6 @@ function classify(tags: Record<string, string>) {
   const leisure = tags.leisure || "";
   const landuse = tags.landuse || "";
   const natural = tags.natural || "";
-  const boundary = tags.boundary || "";
   const highway = tags.highway || "";
   const amenity = tags.amenity || "";
   const manMade = tags.man_made || "";
@@ -135,9 +134,7 @@ function classify(tags: Record<string, string>) {
     landuse === "recreation_ground" ||
     landuse === "forest" ||
     natural === "wood" ||
-    natural === "heath" ||
-    natural === "grassland" ||
-    boundary === "protected_area"
+    natural === "heath"
   ) groups.push("green");
 
   if (["motorway", "trunk", "primary", "secondary"].includes(highway)) groups.push("major_road");
@@ -145,7 +142,7 @@ function classify(tags: Record<string, string>) {
   if (
     ["industrial", "quarry", "landfill"].includes(landuse) ||
     ["waste_disposal", "waste_transfer_station"].includes(amenity) ||
-    ["wastewater_plant", "works"].includes(manMade)
+    manMade === "wastewater_plant"
   ) groups.push("industrial");
 
   return [...new Set(groups)];
@@ -178,15 +175,34 @@ function parseFeatures(elements: any[], latitude: number, longitude: number) {
   return [...map.values()].sort((a, b) => a.distanceMiles - b.distanceMiles);
 }
 
-async function runOverpass(query: string, label: string) {
+function combinedEnvironmentQuery(latitude: number, longitude: number) {
+  return `[out:json][timeout:9];
+    (
+      nwr(around:3000,${latitude},${longitude})[leisure~"^(park|nature_reserve)$"];
+      nwr(around:3000,${latitude},${longitude})[landuse~"^(recreation_ground|forest)$"];
+      nwr(around:3000,${latitude},${longitude})[natural~"^(wood|heath)$"];
+      nwr(around:2600,${latitude},${longitude})[landuse~"^(industrial|quarry|landfill)$"];
+      nwr(around:2600,${latitude},${longitude})[amenity~"^(waste_disposal|waste_transfer_station)$"];
+      nwr(around:2600,${latitude},${longitude})[man_made="wastewater_plant"];
+    )->.places;
+    (
+      way(around:1800,${latitude},${longitude})[highway~"^(motorway|trunk|primary)$"];
+      way(around:900,${latitude},${longitude})[highway="secondary"];
+    )->.roads;
+    .places out center tags;
+    .roads out geom tags;`;
+}
+
+async function runOverpass(latitude: number, longitude: number) {
   const failures: string[] = [];
   const deadline = Date.now() + OVERPASS_BUDGET_MS;
+  const query = combinedEnvironmentQuery(latitude, longitude);
 
   for (let index = 0; index < OVERPASS_ENDPOINTS.length; index++) {
     const endpoint = OVERPASS_ENDPOINTS[index];
     const remaining = deadline - Date.now();
     if (remaining < 1200) break;
-    const timeoutMs = Math.max(1000, Math.min(ENDPOINT_BUDGETS_MS[index] || 6000, remaining - 200));
+    const timeoutMs = Math.max(1000, Math.min(ENDPOINT_BUDGETS_MS[index] || 5000, remaining - 200));
 
     try {
       const response = await fetch(endpoint, {
@@ -194,7 +210,7 @@ async function runOverpass(query: string, label: string) {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "House-Ranker/2.2 environment-v1.3",
+          "User-Agent": "House-Ranker/2.3 environment-v1.4",
         },
         body: new URLSearchParams({ data: query }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -211,38 +227,15 @@ async function runOverpass(query: string, label: string) {
     }
   }
 
-  throw new Error(`${label} query failed within ${Math.round(OVERPASS_BUDGET_MS / 1000)}s budget: ${failures.join(" | ")}`);
+  throw new Error(`combined environment query failed within ${Math.round(OVERPASS_BUDGET_MS / 1000)}s budget: ${failures.join(" | ")}`);
 }
 
 async function loadEnvironmentFeatures(latitude: number, longitude: number) {
-  const placesQuery = `[out:json][timeout:8];(
-    nwr(around:3500,${latitude},${longitude})[leisure~"^(park|nature_reserve)$"];
-    nwr(around:3500,${latitude},${longitude})[landuse~"^(recreation_ground|forest|industrial|quarry|landfill)$"];
-    nwr(around:3500,${latitude},${longitude})[natural~"^(wood|heath|grassland)$"];
-    nwr(around:3500,${latitude},${longitude})[boundary="protected_area"];
-    nwr(around:3500,${latitude},${longitude})[amenity~"^(waste_disposal|waste_transfer_station)$"];
-    nwr(around:3500,${latitude},${longitude})[man_made~"^(wastewater_plant|works)$"];
-  );out center tags;`;
-
-  const roadsQuery = `[out:json][timeout:8];
-    way(around:1800,${latitude},${longitude})[highway~"^(motorway|trunk|primary|secondary)$"];
-    out geom tags;`;
-
-  const [places, roads] = await Promise.all([
-    runOverpass(placesQuery, "places"),
-    runOverpass(roadsQuery, "roads"),
-  ]);
-
-  const features = parseFeatures(
-    [...places.elements, ...roads.elements],
-    latitude,
-    longitude,
-  );
-
+  const loaded = await runOverpass(latitude, longitude);
   return {
-    features,
-    endpoints: [...new Set([places.endpoint, roads.endpoint])],
-    failures: [...places.failures, ...roads.failures],
+    features: parseFeatures(loaded.elements, latitude, longitude),
+    endpoints: [loaded.endpoint],
+    failures: loaded.failures,
   };
 }
 
@@ -463,7 +456,7 @@ Deno.serve(async req => {
         diagnosticCounts: result.diagnosticCounts,
         nearest: result.nearest,
         formula: result.formula,
-        limitations: "V1.3 uses the existing Environment Agency postcode flood score plus straight-line OpenStreetMap proximity. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Raw OSM feature counts are diagnostic only. OSM coverage can be incomplete.",
+        limitations: "V1.4 uses the existing Environment Agency postcode flood score plus one lean combined OpenStreetMap proximity lookup. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Secondary-road screening is deliberately limited to the local area; OSM coverage can be incomplete.",
         endpointFailures: loaded.failures,
       },
     };
