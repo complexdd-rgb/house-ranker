@@ -7,7 +7,7 @@ const OVERPASS_ENDPOINTS = [
 ];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.1";
+const VERSION = "1.2";
 const FALLBACK_FLOOD_SCORE = 60;
 
 const corsHeaders = {
@@ -268,16 +268,15 @@ function roadDistanceScore(miles: number | null, roadClass: string | null) {
   return clamp(Math.round(score), 5, 100);
 }
 
-function landuseDistanceScore(miles: number | null, nearbyCount: number) {
+function landuseDistanceScore(miles: number | null) {
   if (miles === null) return 100;
-  let score = miles <= 0.2 ? 18
+  const score = miles <= 0.2 ? 18
     : miles <= 0.4 ? 35
       : miles <= 0.75 ? 55
         : miles <= 1.25 ? 72
           : miles <= 2 ? 86
             : miles <= 3 ? 95
               : 100;
-  score -= Math.min(15, Math.max(0, nearbyCount - 1) * 4);
   return clamp(Math.round(score), 5, 100);
 }
 
@@ -287,17 +286,14 @@ function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
   const floodAvailable = floodScoreRaw !== null;
 
   const nearestGreen = nearest(features, "green");
-  const greenCount2Miles = countWithin(features, "green", 2);
-  const greenChoice = clamp(Math.round((Math.min(greenCount2Miles, 5) / 5) * 100));
-  const green = clamp(Math.round(0.75 * greenDistanceScore(nearestGreen?.distanceMiles ?? null) + 0.25 * greenChoice));
+  const green = greenDistanceScore(nearestGreen?.distanceMiles ?? null);
 
   const nearestRoad = nearest(features, "major_road");
   const roadClass = nearestRoad?.tags?.highway || null;
   const road = roadDistanceScore(nearestRoad?.distanceMiles ?? null, roadClass);
 
   const nearestIndustrial = nearest(features, "industrial");
-  const industrialCount1Mile = countWithin(features, "industrial", 1);
-  const landuse = landuseDistanceScore(nearestIndustrial?.distanceMiles ?? null, industrialCount1Mile);
+  const landuse = landuseDistanceScore(nearestIndustrial?.distanceMiles ?? null);
 
   const score = clamp(Math.round(
     0.40 * floodScore +
@@ -312,12 +308,12 @@ function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
     components: { flood: floodScore, green, road, landuse },
     floodAvailable,
     nearest: { green: nearestGreen, road: nearestRoad, industrial: nearestIndustrial },
-    counts: {
-      green2Miles: greenCount2Miles,
-      industrial1Mile: industrialCount1Mile,
-      majorRoads1Mile: countWithin(features, "major_road", 1),
+    diagnosticCounts: {
+      greenFeatures2Miles: countWithin(features, "green", 2),
+      industrialFeatures1Mile: countWithin(features, "industrial", 1),
+      majorRoadFeatures1Mile: countWithin(features, "major_road", 1),
     },
-    formula: "40% flood resilience + 25% green/open-space access + 20% major-road exposure + 15% industrial/land-use exposure.",
+    formula: "40% flood resilience + 25% nearest green/open-space access + 20% nearest major-road exposure + 15% nearest industrial/land-use exposure.",
   };
 }
 
@@ -453,10 +449,10 @@ Deno.serve(async req => {
         components: result.components,
         floodAvailable: result.floodAvailable,
         floodBand: property.flood_band || null,
-        counts: result.counts,
+        diagnosticCounts: result.diagnosticCounts,
         nearest: result.nearest,
         formula: result.formula,
-        limitations: "V1 uses the existing Environment Agency postcode flood score plus straight-line OpenStreetMap proximity. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. OSM coverage can be incomplete.",
+        limitations: "V1 uses the existing Environment Agency postcode flood score plus straight-line OpenStreetMap proximity. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Raw OSM feature counts are diagnostic only because one real place or road can contain many mapped features; they are not used in scoring. OSM coverage can be incomplete.",
         endpointFailures: loaded.failures,
       },
     };
@@ -474,7 +470,7 @@ Deno.serve(async req => {
       version: VERSION,
       score: result.score,
       components: result.components,
-      counts: result.counts,
+      diagnosticCounts: result.diagnosticCounts,
       floodAvailable: result.floodAvailable,
       endpoints: loaded.endpoints,
     });
@@ -484,7 +480,7 @@ Deno.serve(async req => {
       version: VERSION,
       score: result.score,
       components: result.components,
-      counts: result.counts,
+      diagnosticCounts: result.diagnosticCounts,
       nearest: result.nearest,
       floodAvailable: result.floodAvailable,
       property: updated,
