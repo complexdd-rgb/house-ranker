@@ -1,5 +1,6 @@
 (() => {
   let checkedThisSession = false;
+  let refreshingAll = false;
 
   async function retryLegacyConnectivitySetup() {
     if (checkedThisSession || !cloud?.session || !cloud?.client || !window.houseRankerConnectivity) return;
@@ -92,6 +93,115 @@
     }
   }
 
+  const refreshSources = [
+    ['EPC & energy', 'epc-enrich'],
+    ['Crime', 'crime-enrich'],
+    ['Schools', 'schools-enrich'],
+    ['Flood', 'flood-enrich'],
+    ['Connectivity', 'connectivity-enrich'],
+    ['Transport & commute', 'transport-enrich'],
+    ['Amenities', 'amenities-enrich'],
+    ['Environment', 'environment-enrich'],
+    ['Property', 'property-enrich'],
+    ['Price & value', 'value-enrich']
+  ];
+
+  function refreshButton() {
+    return document.getElementById('refreshAllData');
+  }
+
+  function setRefreshButton(text, disabled = false) {
+    const button = refreshButton();
+    if (!button) return;
+    button.textContent = text;
+    button.disabled = disabled;
+    button.setAttribute('aria-busy', disabled ? 'true' : 'false');
+  }
+
+  async function refreshAllData() {
+    if (refreshingAll) return;
+    if (!cloud?.client || !cloud?.session) {
+      toast('Sign in to refresh automatic house data');
+      return;
+    }
+
+    const properties = state.properties.filter(property => !property.demo);
+    if (!properties.length) {
+      toast('Add a house before refreshing data');
+      return;
+    }
+
+    refreshingAll = true;
+    const failures = [];
+    let completed = 0;
+    const total = properties.length * refreshSources.length;
+    toast(`Refreshing all data for ${properties.length} house${properties.length === 1 ? '' : 's'}…`);
+
+    try {
+      for (let propertyIndex = 0; propertyIndex < properties.length; propertyIndex++) {
+        const property = properties[propertyIndex];
+        for (const [label, functionName] of refreshSources) {
+          setRefreshButton(`↻ ${propertyIndex + 1}/${properties.length} · ${label}`, true);
+          try {
+            const { data, error } = await cloud.client.functions.invoke(functionName, {
+              body: { propertyId: property.id }
+            });
+            if (error || data?.error) failures.push({ propertyId: property.id, label });
+          } catch {
+            failures.push({ propertyId: property.id, label });
+          }
+          completed += 1;
+          if (completed < total) await new Promise(resolve => setTimeout(resolve, 180));
+        }
+      }
+
+      setRefreshButton('↻ Updating leaderboard…', true);
+      if (typeof hydrateFromCloud === 'function') await hydrateFromCloud();
+      else if (typeof renderDashboard === 'function') renderDashboard();
+
+      if (failures.length) {
+        toast(`Refresh finished · ${total - failures.length}/${total} checks updated. ${failures.length} can be retried later.`);
+      } else {
+        toast('All house data refreshed');
+      }
+    } finally {
+      refreshingAll = false;
+      setRefreshButton('↻ Refresh all data', false);
+    }
+  }
+
+  function setupRefreshAllButton() {
+    const hero = document.querySelector('#dashboard .hero');
+    const addButton = hero?.querySelector('[data-go="add"]');
+    if (!hero || !addButton || refreshButton()) return;
+
+    const actions = document.createElement('div');
+    actions.className = 'hero-refresh-actions';
+    addButton.replaceWith(actions);
+
+    const button = document.createElement('button');
+    button.id = 'refreshAllData';
+    button.className = 'ghost refresh-all-data';
+    button.type = 'button';
+    button.textContent = '↻ Refresh all data';
+    button.title = 'Re-run every automatic data source for all shortlisted houses';
+    button.addEventListener('click', refreshAllData);
+
+    actions.append(button, addButton);
+
+    if (!document.getElementById('refreshAllDataStyle')) {
+      const style = document.createElement('style');
+      style.id = 'refreshAllDataStyle';
+      style.textContent = `
+        .hero-refresh-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+        .refresh-all-data{min-width:150px}
+        .refresh-all-data[disabled]{opacity:.68;cursor:wait}
+        @media (max-width:720px){.hero-refresh-actions{width:100%;justify-content:stretch}.hero-refresh-actions button{flex:1 1 150px}}
+      `;
+      document.head.appendChild(style);
+    }
+  }
+
   document.addEventListener('click', event => {
     const detailButton = event.target.closest?.('[data-detail]');
     if (detailButton) {
@@ -112,8 +222,15 @@
     }
   });
 
+  setupRefreshAllButton();
+  setTimeout(() => setupRefreshAllButton(), 1200);
   setTimeout(() => retryLegacyConnectivitySetup(), 12000);
   setTimeout(() => retryLegacyConnectivitySetup(), 42000);
 
-  window.houseRankerConnectivityRetry = { retryLegacyConnectivitySetup, enhanceConnectivityV2Detail, enhanceValueV12Detail };
+  window.houseRankerConnectivityRetry = {
+    retryLegacyConnectivitySetup,
+    enhanceConnectivityV2Detail,
+    enhanceValueV12Detail,
+    refreshAllData
+  };
 })();
