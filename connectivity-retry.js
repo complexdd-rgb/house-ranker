@@ -74,21 +74,45 @@
     }
   }
 
+  function enhanceValueV11Detail() {
+    const detail = document.getElementById('propertyDetail');
+    const card = detail?.querySelector('.value-detail-card');
+    if (!card) return;
+
+    const benchmarkLabel = card.querySelector('.value-confidence > div:nth-child(3) small');
+    if (benchmarkLabel) benchmarkLabel.textContent = 'Recency-weighted benchmark';
+
+    const method = card.querySelector('.value-method');
+    if (method) {
+      const title = method.querySelector('strong');
+      if (title) title.textContent = 'How Price & Value V1.1 is scored';
+      const paragraphs = method.querySelectorAll('p.muted');
+      if (paragraphs[0]) paragraphs[0].textContent = '80% compares the asking price with HM Land Registry sold-price evidence in the full postcode. Recent sales are weighted much more heavily (about an 18-month half-life), older evidence is only brought in when the local sample is thin, and same-type sales are preferred. A small floor-area and bedroom adjustment is then applied to the benchmark.';
+    }
+  }
+
   document.addEventListener('click', event => {
     const detailButton = event.target.closest?.('[data-detail]');
     if (detailButton) {
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 700);
       setTimeout(() => enhanceConnectivityV2Detail(detailButton.dataset.detail), 1800);
+      setTimeout(() => enhanceValueV11Detail(), 900);
+      setTimeout(() => enhanceValueV11Detail(), 1900);
     }
 
     const retry = event.target.closest?.('[data-connectivity-retry]');
     if (retry) {
       [5000, 15000, 30000].forEach(delay => setTimeout(() => enhanceConnectivityV2Detail(retry.dataset.connectivityRetry), delay));
     }
+
+    const valueRetry = event.target.closest?.('[data-value-retry]');
+    if (valueRetry) {
+      [3000, 8000, 15000].forEach(delay => setTimeout(() => enhanceValueV11Detail(), delay));
+    }
   });
 
   setTimeout(() => retryLegacyConnectivitySetup(), 12000);
   setTimeout(() => retryLegacyConnectivitySetup(), 42000);
 
-  window.houseRankerConnectivityRetry = { retryLegacyConnectivitySetup, enhanceConnectivityV2Detail };
+  window.houseRankerConnectivityRetry = { retryLegacyConnectivitySetup, enhanceConnectivityV2Detail, enhanceValueV11Detail };
 })();
