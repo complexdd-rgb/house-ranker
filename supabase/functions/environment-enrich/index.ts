@@ -9,8 +9,10 @@ const OVERPASS_BUDGET_MS = 16_500;
 const ENDPOINT_BUDGETS_MS = [7_000, 5_500, 4_500];
 const POSTCODE_API = "https://api.postcodes.io";
 const RUN_GUARD_MS = 2 * 60 * 1000;
-const VERSION = "1.4";
+const SUCCESS_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
+const VERSION = "1.5";
 const FALLBACK_FLOOD_SCORE = 60;
+const PROVISIONAL_COMPONENT_SCORE = 60;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -60,7 +62,7 @@ function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number) 
 
 async function fetchJson(url: string) {
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.3" },
+    headers: { Accept: "application/json", "User-Agent": "House-Ranker/2.4" },
     signal: AbortSignal.timeout(6000),
   });
   const text = await response.text();
@@ -210,7 +212,7 @@ async function runOverpass(latitude: number, longitude: number) {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "House-Ranker/2.3 environment-v1.4",
+          "User-Agent": "House-Ranker/2.4 environment-v1.5",
         },
         body: new URLSearchParams({ data: query }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -284,6 +286,15 @@ function landuseDistanceScore(miles: number | null) {
   return clamp(Math.round(score), 5, 100);
 }
 
+function weightedEnvironmentScore(components: { flood: number; green: number; road: number; landuse: number }) {
+  return clamp(Math.round(
+    0.40 * components.flood +
+    0.25 * components.green +
+    0.20 * components.road +
+    0.15 * components.landuse
+  ));
+}
+
 function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
   const floodScoreRaw = numberOrNull(floodScoreInput);
   const floodScore = floodScoreRaw === null ? FALLBACK_FLOOD_SCORE : clamp(Math.round(floodScoreRaw));
@@ -299,18 +310,14 @@ function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
   const nearestIndustrial = nearest(features, "industrial");
   const landuse = landuseDistanceScore(nearestIndustrial?.distanceMiles ?? null);
 
-  const score = clamp(Math.round(
-    0.40 * floodScore +
-    0.25 * green +
-    0.20 * road +
-    0.15 * landuse
-  ));
+  const components = { flood: floodScore, green, road, landuse };
 
   return {
-    score,
+    score: weightedEnvironmentScore(components),
     status: floodAvailable ? "matched" : "partial",
-    components: { flood: floodScore, green, road, landuse },
+    components,
     floodAvailable,
+    provisional: false,
     nearest: { green: nearestGreen, road: nearestRoad, industrial: nearestIndustrial },
     diagnosticCounts: {
       greenFeatures2Miles: countWithin(features, "green", 2),
@@ -319,6 +326,37 @@ function scoreEnvironment(features: Feature[], floodScoreInput: unknown) {
     },
     formula: "40% flood resilience + 25% nearest green/open-space access + 20% nearest major-road exposure + 15% nearest industrial/land-use exposure.",
   };
+}
+
+function provisionalEnvironment(floodScoreInput: unknown) {
+  const floodScoreRaw = numberOrNull(floodScoreInput);
+  const floodScore = floodScoreRaw === null ? FALLBACK_FLOOD_SCORE : clamp(Math.round(floodScoreRaw));
+  const neutral = PROVISIONAL_COMPONENT_SCORE;
+  const components = { flood: floodScore, green: neutral, road: neutral, landuse: neutral };
+  return {
+    score: weightedEnvironmentScore(components),
+    status: "partial",
+    components,
+    floodAvailable: floodScoreRaw !== null,
+    provisional: true,
+    nearest: { green: null, road: null, industrial: null },
+    diagnosticCounts: {
+      greenFeatures2Miles: null,
+      industrialFeatures1Mile: null,
+      majorRoadFeatures1Mile: null,
+    },
+    formula: "40% known flood resilience + neutral provisional assumptions for green-space, major-road and industrial exposure until OpenStreetMap data is available.",
+  };
+}
+
+function freshMatchedCache(property: any) {
+  const score = numberOrNull(property?.environment_score);
+  if (property?.environment_status !== "matched" || score === null || !property?.environment_enriched_at) return null;
+  const refreshedAt = Date.parse(String(property.environment_enriched_at));
+  if (!Number.isFinite(refreshedAt)) return null;
+  const ageMs = Date.now() - refreshedAt;
+  if (ageMs < 0 || ageMs > SUCCESS_CACHE_MS) return null;
+  return { score, refreshedAt: new Date(refreshedAt).toISOString(), ageMs };
 }
 
 Deno.serve(async req => {
@@ -353,6 +391,19 @@ Deno.serve(async req => {
     .eq("id", propertyId)
     .single();
   if (propertyError || !property) return json({ error: "Property not found" }, 404);
+
+  const cached = freshMatchedCache(property);
+  if (cached) {
+    return json({
+      status: "matched",
+      version: VERSION,
+      score: cached.score,
+      cached: true,
+      cachedAt: cached.refreshedAt,
+      cacheMaxAgeDays: Math.round(SUCCESS_CACHE_MS / 86_400_000),
+      property,
+    });
+  }
 
   const activeSince = new Date(Date.now() - RUN_GUARD_MS).toISOString();
   const { data: activeRuns } = await supabase
@@ -446,6 +497,7 @@ Deno.serve(async req => {
       environment: {
         version: VERSION,
         status: result.status,
+        provisional: false,
         source: "Environment Agency flood screening + OpenStreetMap via Overpass API",
         endpoints: loaded.endpoints,
         locationMethod: location.method,
@@ -456,8 +508,9 @@ Deno.serve(async req => {
         diagnosticCounts: result.diagnosticCounts,
         nearest: result.nearest,
         formula: result.formula,
-        limitations: "V1.4 uses the existing Environment Agency postcode flood score plus one lean combined OpenStreetMap proximity lookup. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Secondary-road screening is deliberately limited to the local area; OSM coverage can be incomplete.",
+        limitations: "V1.5 caches matched OSM-backed results for seven days. Major-road distance is a noise/air-quality exposure proxy, not a measured noise or pollution reading. Secondary-road screening is deliberately local and OSM coverage can be incomplete.",
         endpointFailures: loaded.failures,
+        successfulOsmAt: now,
       },
     };
 
@@ -487,6 +540,7 @@ Deno.serve(async req => {
       diagnosticCounts: result.diagnosticCounts,
       nearest: result.nearest,
       floodAvailable: result.floodAvailable,
+      provisional: false,
       property: updated,
     });
   } catch (error) {
@@ -499,24 +553,94 @@ Deno.serve(async req => {
         environment_status: "partial",
         updated_at: now,
       }).eq("id", propertyId).select("*").single();
-      await finishRun("failed", { outcome: "retained_previous", version: VERSION, retainedScore: previousScore }, message);
+      await finishRun("succeeded", { outcome: "retained_previous", version: VERSION, retainedScore: previousScore }, message);
       return json({
         status: "partial",
         version: VERSION,
         score: previousScore,
         retained: true,
-        transientError: true,
+        softFailure: true,
         detail: message,
         property: updated,
       });
     }
 
-    await supabase.from("properties").update({
-      environment_status: "error",
+    const provisional = provisionalEnvironment(property.flood_score);
+    const metrics = { ...(property.metrics || {}), environment: provisional.score };
+    const { data: updated, error: updateError } = await supabase.from("properties").update({
+      environment_status: "partial",
+      environment_score: provisional.score,
+      environment_flood_score: provisional.components.flood,
+      environment_green_score: provisional.components.green,
+      environment_road_score: provisional.components.road,
+      environment_landuse_score: provisional.components.landuse,
+      environment_nearest_green_name: null,
+      environment_nearest_green_miles: null,
+      environment_nearest_major_road_name: null,
+      environment_nearest_major_road_class: null,
+      environment_nearest_major_road_miles: null,
+      environment_nearest_industrial_name: null,
+      environment_nearest_industrial_miles: null,
       environment_enriched_at: now,
+      metrics,
       updated_at: now,
-    }).eq("id", propertyId);
-    await finishRun("failed", { outcome: "error", version: VERSION }, message);
-    return json({ error: "Environment lookup failed", detail: message, version: VERSION }, 502);
+    }).eq("id", propertyId).select("*").single();
+
+    if (updateError) {
+      await finishRun("failed", { outcome: "error", version: VERSION }, `${message} | provisional update failed: ${updateError.message}`);
+      return json({ error: "Environment lookup failed", detail: message, version: VERSION }, 502);
+    }
+
+    const { data: area } = await supabase
+      .from("area_metrics")
+      .select("raw_data")
+      .eq("property_id", propertyId)
+      .maybeSingle();
+
+    const rawData = {
+      ...(area?.raw_data || {}),
+      environment: {
+        version: VERSION,
+        status: "partial",
+        provisional: true,
+        source: "Environment Agency flood screening with neutral OSM fallback",
+        score: provisional.score,
+        components: provisional.components,
+        floodAvailable: provisional.floodAvailable,
+        floodBand: property.flood_band || null,
+        diagnosticCounts: provisional.diagnosticCounts,
+        nearest: provisional.nearest,
+        formula: provisional.formula,
+        limitations: "OpenStreetMap was temporarily unavailable. Green-space, road and industrial components are held at neutral 60 until a later refresh can replace them with measured OSM proximity data.",
+        overpassError: message,
+        provisionalAt: now,
+      },
+    };
+
+    await supabase.from("area_metrics").upsert({
+      property_id: propertyId,
+      environment_score: provisional.score,
+      raw_data: rawData,
+      refreshed_at: now,
+    }, { onConflict: "property_id" });
+
+    await finishRun("succeeded", {
+      outcome: "provisional",
+      version: VERSION,
+      score: provisional.score,
+      components: provisional.components,
+      floodAvailable: provisional.floodAvailable,
+    }, message);
+
+    return json({
+      status: "partial",
+      version: VERSION,
+      score: provisional.score,
+      provisional: true,
+      softFailure: true,
+      detail: message,
+      components: provisional.components,
+      property: updated,
+    });
   }
 });
