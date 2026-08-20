@@ -43,6 +43,12 @@
     return `${n >= 100 ? Math.round(n) : n.toFixed(1)} Mbps`;
   }
 
+  function percent(value) {
+    const n = numberOrNull(value);
+    if (n === null) return '—';
+    return `${Math.round(n)}%`;
+  }
+
   function yesNo(value) {
     if (value === true) return 'Yes';
     if (value === false) return 'No';
@@ -94,7 +100,7 @@
 
   function renderNetworks(mobile) {
     const rows = mobile?.networks || [];
-    if (!rows.length) return '<p class="muted connectivity-empty">No mobile network detail is available yet.</p>';
+    if (!rows.length) return '';
     return `
       <div class="connectivity-networks">
         ${rows.map(row => `
@@ -117,24 +123,28 @@
       const broadbandScore = c.broadbandScore === null ? '—' : `${Math.round(c.broadbandScore)}/100`;
       const mobileScore = c.mobileScore === null ? '—' : `${Math.round(c.mobileScore)}/100`;
       const premiseMode = c.broadband?.premiseMode || c.mobile?.premiseMode;
+      const hasBroadband = c.broadbandScore !== null && c.broadbandScore !== undefined;
+      const hasMobile = c.mobileScore !== null && c.mobileScore !== undefined;
+      const hasBothSources = hasBroadband && hasMobile;
+      const openBroadband = c.broadband?.coverage || null;
+      const openMobile = c.mobile?.localAuthority ? c.mobile : null;
+      const matchText = openBroadband || openMobile ? 'Postcode + area' : matchMode(premiseMode);
 
-      return `
-        <section class="connectivity-detail-card ${escapeHtml(c.status)}">
-          <div class="connectivity-detail-heading">
-            <div><p class="eyebrow">AUTOMATIC CONNECTIVITY DATA</p><h3>Broadband & mobile</h3></div>
-            <span class="connectivity-score">${score}/100</span>
-          </div>
+      const sourceMessage = hasBothSources
+        ? '<p class="connectivity-warning">Broadband is postcode-level and mobile is local-authority-level, so this is a high-quality area score rather than an exact signal test inside the house.</p>'
+        : '<p class="connectivity-warning">Only one Ofcom source returned successfully; this score currently uses the available source only.</p>';
 
-          ${c.status === 'partial' ? '<p class="connectivity-warning">One Ofcom source returned successfully; this score currently uses the available source only.</p>' : ''}
-
-          <div class="connectivity-summary-grid">
-            <div><small>Connectivity</small><strong>${score}/100</strong></div>
-            <div><small>Broadband</small><strong>${broadbandScore}</strong></div>
-            <div><small>Mobile</small><strong>${mobileScore}</strong></div>
-            <div><small>Match</small><strong>${escapeHtml(matchMode(premiseMode))}</strong></div>
-          </div>
-
-          <div class="connectivity-columns">
+      const broadbandPanel = openBroadband ? `
+            <div class="connectivity-panel">
+              <small>BROADBAND AVAILABILITY</small>
+              <h4>${percent(openBroadband.gigabit)} gigabit</h4>
+              <div class="connectivity-facts">
+                <span>30+ Mbps <b>${percent(openBroadband.sfbb30)}</b></span>
+                <span>100+ Mbps <b>${percent(openBroadband.ufbb100)}</b></span>
+                <span>300+ Mbps <b>${percent(openBroadband.ufbb300)}</b></span>
+                <span>Gigabit <b>${percent(openBroadband.gigabit)}</b></span>
+              </div>
+            </div>` : `
             <div class="connectivity-panel">
               <small>BROADBAND</small>
               <h4>${speed(c.maxDownloadMbps)} download</h4>
@@ -143,8 +153,17 @@
                 <span>Full fibre <b>${yesNo(c.fullFibre)}</b></span>
                 <span>Gigabit <b>${yesNo(c.gigabit)}</b></span>
               </div>
-            </div>
+            </div>`;
 
+      const mobilePanel = openMobile ? `
+            <div class="connectivity-panel">
+              <small>MOBILE COVERAGE</small>
+              <h4>${percent(openMobile.indoor4gNetworkIndex)} indoor 4G network index</h4>
+              <div class="connectivity-facts">
+                <span>Outdoor 5G network index <b>${percent(openMobile.outdoor5gNetworkIndex)}</b></span>
+                <span>Area <b>${escapeHtml(openMobile.localAuthority?.name || '—')}</b></span>
+              </div>
+            </div>` : `
             <div class="connectivity-panel">
               <small>MOBILE DATA</small>
               <h4>${c.indoorNetworks === null ? '—' : `${Math.round(c.indoorNetworks)}/4`} likely indoors</h4>
@@ -152,10 +171,30 @@
                 <span>Likely outdoors <b>${c.outdoorNetworks === null ? '—' : `${Math.round(c.outdoorNetworks)}/4`}</b></span>
               </div>
               ${renderNetworks(c.mobile)}
-            </div>
+            </div>`;
+
+      return `
+        <section class="connectivity-detail-card ${escapeHtml(c.status)}">
+          <div class="connectivity-detail-heading">
+            <div><p class="eyebrow">AUTOMATIC CONNECTIVITY DATA</p><h3>Broadband & mobile</h3></div>
+            <span class="connectivity-score">${score}/100</span>
           </div>
 
-          <p class="muted connectivity-footnote">Source: Ofcom Connected Nations postcode coverage APIs. Coverage and speeds are predictions rather than guarantees. House Ranker uses the EPC UPRN for an exact-premises match when Ofcom returns it; otherwise it uses a postcode median. The internal Connectivity score is 70% broadband and 30% mobile when both sources are available.</p>
+          ${sourceMessage}
+
+          <div class="connectivity-summary-grid">
+            <div><small>Connectivity</small><strong>${score}/100</strong></div>
+            <div><small>Broadband</small><strong>${broadbandScore}</strong></div>
+            <div><small>Mobile</small><strong>${mobileScore}</strong></div>
+            <div><small>Coverage level</small><strong>${escapeHtml(matchText)}</strong></div>
+          </div>
+
+          <div class="connectivity-columns">
+            ${broadbandPanel}
+            ${mobilePanel}
+          </div>
+
+          <p class="muted connectivity-footnote">Source: Ofcom Connected Nations Spring 2026 open datasets. Broadband uses residential availability at postcode level; mobile uses local-authority coverage, so real service at an individual property can vary. The Connectivity score is 75% broadband and 25% mobile when both sources are available.</p>
           <button class="ghost connectivity-retry" type="button" data-connectivity-retry="${property.id}">Refresh connectivity data</button>
         </section>`;
     }
@@ -163,13 +202,13 @@
     const messages = {
       pending: 'This property is waiting for its first Ofcom broadband and mobile lookup.',
       needs_location: 'House Ranker needs a full postcode before it can look up connectivity.',
-      needs_api_keys: 'The Ofcom API subscriptions need adding to Supabase before automatic connectivity can run.',
+      needs_api_keys: 'This property still has a legacy Ofcom setup status. Retry the connectivity lookup to use the free open datasets.',
       error: 'The connectivity lookup could not complete. The property remains saved and can be retried.'
     };
     const titles = {
       pending: 'Connectivity lookup pending',
       needs_location: 'Waiting for postcode',
-      needs_api_keys: 'Ofcom API setup required',
+      needs_api_keys: 'Connectivity retry required',
       error: 'Connectivity lookup unavailable'
     };
 
@@ -243,9 +282,10 @@
 
     if (!quiet) {
       if (data?.status === 'matched' || data?.status === 'partial') {
-        toast(`Connectivity score ${data.score}/100${data.status === 'partial' ? ' · partial Ofcom data' : ''}`);
+        const both = data?.broadbandScore !== null && data?.broadbandScore !== undefined && data?.mobileScore !== null && data?.mobileScore !== undefined;
+        toast(`Connectivity score ${data.score}/100${both ? ' · broadband + mobile' : ' · partial Ofcom data'}`);
       } else if (data?.status === 'needs_api_keys') {
-        toast('Ofcom API keys need adding to Supabase first');
+        toast('Retry connectivity to use the free Ofcom open datasets');
       } else if (data?.status === 'needs_location') {
         toast('Connectivity lookup needs a full postcode');
       } else if (data?.status === 'already_running') {
